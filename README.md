@@ -1,138 +1,216 @@
 # tap-fred
 
-`tap-fred` is a Singer tap for FRED.
+Production-ready Meltano extractor for the Federal Reserve Economic Data (FRED) API with ALFRED vintage data support for institutional-grade backtesting.
 
 Built with the [Meltano Tap SDK](https://sdk.meltano.com) for Singer Taps.
 
-Meltano extractor for FRED database: https://fred.stlouisfed.org/docs/api/fred
+## Features
 
-<!--
+- **FRED Mode**: Current revised economic data for analysis and reporting
+- **ALFRED Mode**: Historical vintage data for backtesting without look-ahead bias
+- **319+ Economic Releases**: All major indicators from BEA, BLS, Census, Fed, and more
+- **Incremental Loading**: State management with configurable replication keys
+- **Production Ready**: Rate limiting, retry logic, error handling, and API key security
+- **Wildcard Support**: Extract all series IDs with `series_ids: "*"`
 
-Developer TODO: Update the below as needed to correctly describe the install procedure. For instance, if you do not have a PyPI repo, or if you want users to directly install from your git repo, you can modify this step as appropriate.
+## Quick Start
 
-## Installation
+### 1. Get FRED API Key
+Register at https://fred.stlouisfed.org/docs/api/api_key.html
 
-Install from PyPI:
-
+### 2. Install Meltano
 ```bash
-pipx install tap-fred
+pipx install meltano
+cd your-project
+meltano install extractor tap-fred
 ```
 
-Install from GitHub:
-
-```bash
-pipx install git+https://github.com/ORG_NAME/tap-fred.git@main
+### 3. Configure
+```yaml
+# meltano.yml
+extractors:
+- name: tap-fred
+  config:
+    api_key: ${FRED_API_KEY}
+    series_ids: ["GDP", "UNRATE"]  # Or "*" for all series
+    data_mode: "FRED"  # Use "ALFRED" for vintage data
 ```
 
--->
+### 4. Run Extraction
+```bash
+# Set API key
+export FRED_API_KEY=your_api_key_here
+
+# Extract current data
+meltano el tap-fred target-jsonl --select series_observations
+
+# Extract vintage data (backtesting mode)
+meltano config tap-fred set data_mode ALFRED
+meltano config tap-fred set realtime_start 2020-06-01
+meltano config tap-fred set realtime_end 2020-06-01
+meltano el tap-fred target-jsonl --select series_observations
+```
 
 ## Configuration
 
-### Accepted Config Options
+### Core Settings
 
-<!--
-Developer TODO: Provide a list of config options accepted by the tap.
+| Setting | Type | Required | Description |
+|---------|------|----------|-------------|
+| `api_key` | string | ✅ | FRED API key |
+| `series_ids` | array/string | ✅ | Series IDs to extract (or "*" for all) |
+| `data_mode` | string | | "FRED" (default) or "ALFRED" |
+| `start_date` | date | | Earliest observation date |
+| `api_url` | string | | FRED API base URL |
+| `min_throttle_seconds` | float | | Rate limiting (default: 0.01) |
 
-This section can be created by copy-pasting the CLI output from:
+### ALFRED Mode (Vintage Data)
 
+| Setting | Type | Description |
+|---------|------|-------------|
+| `realtime_start` | date | Data as it existed on this date |
+| `realtime_end` | date | End of vintage period (use same as start for point-in-time) |
+
+## FRED vs ALFRED Modes
+
+### FRED Mode (Default)
+```yaml
+config:
+  data_mode: "FRED"
+  series_ids: ["GDP", "UNRATE"]
 ```
-tap-fred --about --format=markdown
+- **Use for**: Current analysis, reporting, research
+- **Data**: Current revised values - "what we know now about the past"
+- **Output**: Latest economic data with all historical revisions
+
+### ALFRED Mode (Backtesting)
+```yaml
+config:
+  data_mode: "ALFRED"
+  series_ids: ["GDP", "UNRATE"] 
+  realtime_start: "2020-06-01"
+  realtime_end: "2020-06-01"
 ```
--->
+- **Use for**: Backtesting, trading algorithms, machine learning models
+- **Data**: Vintage historical data - "what we knew then"
+- **Output**: Only data available on the specified date
+- **Prevents**: Look-ahead bias in backtesting
 
-A full list of supported settings and capabilities for this
-tap is available by running:
+### Example Output Comparison
 
-```bash
-tap-fred --about
-```
-
-### Configure using environment variables
-
-This Singer tap will automatically import any environment variables within the working directory's
-`.env` if the `--config=ENV` is provided, such that config values will be considered if a matching
-environment variable is set either in the terminal context or in the `.env` file.
-
-### Source Authentication and Authorization
-
-<!--
-Developer TODO: If your tap requires special access on the source system, or any special authentication requirements, provide those here.
--->
-
-## Usage
-
-You can easily run `tap-fred` by itself or in a pipeline using [Meltano](https://meltano.com/).
-
-### Executing the Tap Directly
-
-```bash
-tap-fred --version
-tap-fred --help
-tap-fred --config CONFIG --discover > ./catalog.json
+**FRED Mode (Current Revised Data):**
+```json
+{"realtime_start": "2025-08-27", "realtime_end": "2025-08-27", "date": "2020-01-01", "value": 21727.657, "series_id": "GDP"}
 ```
 
-## Developer Resources
+**ALFRED Mode (Vintage Data):**
+```json
+{"realtime_start": "2020-06-01", "realtime_end": "2020-06-01", "date": "2020-01-01", "value": 21534.907, "series_id": "GDP"}
+```
 
-Follow these instructions to contribute to this project.
+## Data Reliability for Backtesting
 
-### Initialize your Development Environment
+### ✅ Verified: No Intraday Updates
 
-Prerequisites:
+FRED/ALFRED data follows predetermined government release schedules and does NOT update intraday:
 
+**Major Release Times:**
+- **BEA** (GDP, Personal Income): 8:30 AM ET
+- **BLS** (Unemployment, CPI): 8:30 AM ET  
+- **Fed** (Interest Rates): 3:15 PM CT
+
+**Backtesting Guarantee:**
+A vintage record with `realtime_start: "2020-06-01"` represents exactly what was known on June 1, 2020 - whether you traded at 9 AM, 3 PM, or 11:59 PM that day.
+
+### Data Sources (319 Releases)
+- **Federal Agencies**: BEA, BLS, Census Bureau, Treasury, Federal Reserve
+- **Regional Fed Banks**: Chicago Fed, NY Fed, Atlanta Fed, etc.
+- **Private Sources**: ADP, Conference Board, and more
+
+## Available Streams
+
+Currently supported stream (more can be added following existing patterns):
+
+### series_observations
+- **Description**: Economic data points for specified series
+- **Primary Keys**: `["series_id", "date"]`
+- **Replication Key**: `date` (incremental loading)
+- **Schema**: 
+  - `series_id` (string): FRED series identifier
+  - `date` (date): Observation date
+  - `value` (number): Economic data value
+  - `realtime_start` (date): Vintage start date
+  - `realtime_end` (date): Vintage end date
+
+## Development
+
+### Prerequisites
 - Python 3.9+
 - [uv](https://docs.astral.sh/uv/)
 
+### Setup
 ```bash
+# Clone and install
+git clone <repo-url>
+cd tap-fred
 uv sync
-```
 
-### Create and Run Tests
-
-Create tests within the `tests` subfolder and
-then run:
-
-```bash
+# Test
 uv run pytest
-```
 
-You can also test the `tap-fred` CLI interface directly using `uv run`:
-
-```bash
+# Run directly
 uv run tap-fred --help
 ```
 
-### Testing with [Meltano](https://www.meltano.com)
-
-_**Note:** This tap will work in any Singer environment and does not require Meltano.
-Examples here are for convenience and to streamline end-to-end orchestration scenarios._
-
-<!--
-Developer TODO:
-Your project comes with a custom `meltano.yml` project file already created. Open the `meltano.yml` and follow any "TODO" items listed in
-the file.
--->
-
-Next, install Meltano (if you haven't already) and any needed plugins:
-
+### Testing with Meltano
 ```bash
-# Install meltano
+# Install Meltano and plugins
 pipx install meltano
-# Initialize meltano within this directory
 cd tap-fred
 meltano install
+
+# Test discovery
+meltano invoke tap-fred --discover
+
+# Run extraction
+meltano el tap-fred target-jsonl --select series_observations
 ```
 
-Now you can test and orchestrate using Meltano:
+## Production Deployment
 
+### Environment Variables
 ```bash
-# Test invocation:
-meltano invoke tap-fred --version
-
-# OR run a test ELT pipeline:
-meltano run tap-fred target-jsonl
+export FRED_API_KEY=your_api_key_here
 ```
 
-### SDK Dev Guide
+### Rate Limiting
+```yaml
+config:
+  min_throttle_seconds: 1.0  # 60 requests/minute (under 120/min FRED limit)
+```
 
-See the [dev guide](https://sdk.meltano.com/en/latest/dev_guide.html) for more instructions on how to use the SDK to
-develop your own taps and targets.
+### Incremental Loading
+The extractor automatically manages state for incremental loading:
+- Uses `date` as replication key
+- Tracks last extracted date per series
+- Resumes from last extraction point
+
+### Error Handling
+- Exponential backoff with jitter
+- Retry on 429, 500, 502, 503, 504 errors
+- API key redaction in logs
+- Thread-safe series caching
+
+## License
+
+[Your License Here]
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make changes following existing patterns
+4. Add tests
+5. Submit a pull request
+
+For more details, see `.claude/CLAUDE.md` for complete technical documentation.

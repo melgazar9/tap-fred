@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from singer_sdk import Tap
-from singer_sdk import typing as th  # JSON schema typing helpers
+from threading import Lock
 
-# TODO: Import your custom stream types here:
-from tap_fred import streams
+from singer_sdk import Tap
+from singer_sdk import typing as th
+
+from tap_fred.client import FREDStream
+
+from tap_fred.streams.series_streams import SeriesObservationsStream
 
 
 class TapFRED(Tap):
@@ -14,54 +17,80 @@ class TapFRED(Tap):
 
     name = "tap-fred"
 
-    # TODO: Update this section with the actual config values you expect:
     config_jsonschema = th.PropertiesList(
         th.Property(
-            "auth_token",
-            th.StringType(nullable=False),
+            "api_key",
+            th.StringType,
             required=True,
-            secret=True,  # Flag config as protected.
-            title="Auth Token",
-            description="The token to authenticate against the API service",
+            secret=True,
+            description="API key for FRED (Federal Reserve Economic Data) service",
         ),
         th.Property(
-            "project_ids",
-            th.ArrayType(th.StringType(nullable=False), nullable=False),
+            "series_ids",
+            th.OneOf(th.StringType, th.ArrayType(th.StringType)),
             required=True,
-            title="Project IDs",
-            description="Project IDs to replicate",
+            description="FRED series IDs to replicate (e.g., 'GDP' or ['GDP', 'UNRATE'] or '*' for all)",
         ),
         th.Property(
             "start_date",
-            th.DateTimeType(nullable=True),
-            description="The earliest record date to sync",
+            th.DateTimeType,
+            description="The earliest observation date to sync",
         ),
         th.Property(
             "api_url",
-            th.StringType(nullable=False),
-            title="API URL",
-            default="https://api.mysample.com",
-            description="The url for the API service",
+            th.StringType,
+            default="https://api.stlouisfed.org/fred",
+            description="The url for the FRED API service",
         ),
         th.Property(
             "user_agent",
-            th.StringType(nullable=True),
-            description=(
-                "A custom User-Agent header to send with each request. Default is "
-                "'<tap_name>/<tap_version>'"
-            ),
+            th.StringType,
+            description="Custom User-Agent header to send with each request",
+        ),
+        th.Property(
+            "data_mode",
+            th.StringType,
+            default="FRED",
+            description="Data mode: 'FRED' for current revised data, 'ALFRED' for vintage historical data",
+        ),
+        th.Property(
+            "realtime_start",
+            th.DateTimeType,
+            description="Real-time start date for ALFRED vintage data (YYYY-MM-DD). Only used when data_mode='ALFRED'",
+        ),
+        th.Property(
+            "realtime_end",
+            th.DateTimeType,
+            description="Real-time end date for ALFRED vintage data (YYYY-MM-DD). Only used when data_mode='ALFRED'",
         ),
     ).to_dict()
 
-    def discover_streams(self) -> list[streams.FREDStream]:
-        """Return a list of discovered streams.
+    _series_cache = {}
+    _cache_lock = Lock()
 
-        Returns:
-            A list of discovered streams.
-        """
+    def get_cached_series_ids(self) -> list[str]:
+        """Get cached series IDs using FREDStream client method."""
+        with self._cache_lock:
+            if not self._series_cache:
+                series_ids = self.config["series_ids"]
+
+                if series_ids == "*" or series_ids == ["*"]:
+                    # Use FREDStream client to fetch all series IDs
+                    temp_stream = SeriesObservationsStream(self)
+                    series_ids = temp_stream._fetch_all_series_ids()
+                elif isinstance(series_ids, str):
+                    series_ids = [series_ids]
+                elif not isinstance(series_ids, list):
+                    raise ValueError("series_ids must be a string or list of strings")
+
+                self._series_cache = series_ids
+
+            return self._series_cache
+
+    def discover_streams(self) -> list[FREDStream]:
+        """Return a list of discovered streams."""
         return [
-            streams.GroupsStream(self),
-            streams.UsersStream(self),
+            SeriesObservationsStream(self),
         ]
 
 

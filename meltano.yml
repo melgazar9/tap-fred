@@ -1,11 +1,12 @@
 version: 1
 send_anonymous_usage_stats: true
 project_id: "tap-fred"
-default_environment: test
+default_environment: dev
 venv:
   backend: uv
 environments:
-- name: test
+- name: dev
+- name: prod
 plugins:
   extractors:
   - name: "tap-fred"
@@ -18,30 +19,102 @@ plugins:
     - about
     - stream-maps
 
-    # TODO: Declare settings and their types here:
     settings:
-    - name: username
-      label: Username
-      description: The username to use for authentication
-
-    - name: password
+    - name: api_key
       kind: password
-      label: Password
-      description: The password to use for authentication
+      label: FRED API Key
+      description: Your FRED API key from https://fred.stlouisfed.org/docs/api/api_key.html
       sensitive: true
 
+    - name: series_ids
+      label: Series IDs
+      description: FRED series IDs to extract (e.g., 'GDP' or ['GDP', 'UNRATE'] or '*' for defaults)
+      
     - name: start_date
       kind: date_iso8601
       label: Start Date
-      description: Initial date to start extracting data from
+      description: Earliest observation date to extract
 
-    # TODO: Declare required settings here:
+    - name: api_url
+      label: API Base URL
+      description: FRED API base URL
+
+    - name: user_agent
+      label: User Agent
+      description: Custom User-Agent header for requests
+      
+    - name: min_throttle_seconds
+      label: Minimum Throttle Seconds
+      description: Minimum seconds between API requests (default 0.01, set to 1.0 for 60 req/min)
+      default: 0.01
+      
+    # Per-stream configurable query parameters (optional)
+    - name: default_params
+      kind: object
+      label: Default Parameters
+      description: Default query/path parameters for all streams
+      
+    - name: series_observations_params
+      kind: object
+      label: Series Observations Parameters
+      description: Custom parameters for series_observations stream
+      
+    - name: releases_params
+      kind: object
+      label: Releases Parameters  
+      description: Custom parameters for releases stream
+      
+    # FRED vs ALFRED mode settings
+    - name: data_mode
+      kind: options
+      label: Data Mode
+      description: 'FRED for current revised data, ALFRED for vintage historical data'
+      options:
+        - label: FRED (Current Revised Data)
+          value: FRED
+        - label: ALFRED (Vintage Historical Data)  
+          value: ALFRED
+      default: FRED
+      
+    - name: realtime_start
+      kind: date_iso8601
+      label: Realtime Start Date
+      description: Start date for ALFRED vintage data (YYYY-MM-DD). Only used when data_mode=ALFRED
+      
+    - name: realtime_end
+      kind: date_iso8601
+      label: Realtime End Date
+      description: End date for ALFRED vintage data (YYYY-MM-DD). Only used when data_mode=ALFRED
+
     settings_group_validation:
-    - [username, password]
+    - [api_key]
 
-    # TODO: Declare default configuration values here:
     config:
-      start_date: '2010-01-01T00:00:00Z'
+      api_key: ${FRED_API_KEY}
+      series_ids: ["GDP", "UNRATE"]  # Test with just 2 series
+      api_url: 'https://api.stlouisfed.org/fred'
+      min_throttle_seconds: 1.0  # 60 requests/minute (under 120/min limit)
+      start_date: "2020-01-01"
+      
+      # ALFRED Mode Configuration for vintage data
+      data_mode: "ALFRED"  # Use vintage historical data 
+      realtime_start: "2020-06-01"  # Data as it existed on June 1, 2020
+      realtime_end: "2020-06-01"    # Same date = point-in-time vintage
+      
+      # Example: Default parameters applied to all streams
+      # default_params:
+      #   query_params:
+      #     limit: 1000
+      
+      # Example: Stream-specific parameters
+      # releases_params:
+      #   query_params:
+      #     order_by: "release_id"
+      #     sort_order: "asc"
+      #     limit: 100
+
+    select:
+      series_observations: "*"
 
   loaders:
   - name: target-jsonl
