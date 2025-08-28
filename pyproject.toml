@@ -38,7 +38,8 @@ tap-fred = 'tap_fred.tap:TapFRED.cli'
 
 [dependency-groups]
 dev = [
-    { include-group = "test" },
+    "pytest>=8",
+    "singer-sdk[testing]",
 ]
 test = [
     "pytest>=8",
