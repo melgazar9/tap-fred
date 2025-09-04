@@ -1,6 +1,6 @@
 version: 1
 send_anonymous_usage_stats: true
-project_id: "tap-fred"
+project_id: tap-fred
 default_environment: dev
 venv:
   backend: uv
@@ -9,8 +9,8 @@ environments:
 - name: prod
 plugins:
   extractors:
-  - name: "tap-fred"
-    namespace: "tap_fred"
+  - name: tap-fred
+    namespace: tap_fred
     pip_url: -e .
     capabilities:
     - state
@@ -19,17 +19,22 @@ plugins:
     - about
     - stream-maps
 
+    settings_group_validation:
+    - [api_key]
+
     settings:
     - name: api_key
-      kind: password
+      kind: string
       label: FRED API Key
-      description: Your FRED API key from https://fred.stlouisfed.org/docs/api/api_key.html
+      description: Your FRED API key from 
+        https://fred.stlouisfed.org/docs/api/api_key.html
       sensitive: true
 
     - name: series_ids
       label: Series IDs
-      description: FRED series IDs to extract (e.g., 'GDP' or ['GDP', 'UNRATE'] or '*' for defaults)
-      
+      description: FRED series IDs to extract (e.g., 'GDP' or ['GDP', 'UNRATE'] 
+        or '*' for defaults)
+
     - name: start_date
       kind: date_iso8601
       label: Start Date
@@ -42,70 +47,127 @@ plugins:
     - name: user_agent
       label: User Agent
       description: Custom User-Agent header for requests
-      
+
+    - name: max_requests_per_minute
+      label: Max Requests Per Minute
+      description: Maximum API requests per minute (default 60, FRED allows up 
+        to 120)
+      default: 60
+
     - name: min_throttle_seconds
       label: Minimum Throttle Seconds
-      description: Minimum seconds between API requests (default 0.01, set to 1.0 for 60 req/min)
-      default: 0.01
-      
+      description: Minimum seconds between consecutive API requests (default 1.0
+        for 60/min rate)
+      default: 1.0
+
     # Per-stream configurable query parameters (optional)
     - name: default_params
       kind: object
       label: Default Parameters
       description: Default query/path parameters for all streams
-      
+
     - name: series_observations_params
       kind: object
       label: Series Observations Parameters
       description: Custom parameters for series_observations stream
-      
+
     - name: releases_params
       kind: object
-      label: Releases Parameters  
+      label: Releases Parameters
       description: Custom parameters for releases stream
-      
+
     # FRED vs ALFRED mode settings
     - name: data_mode
       kind: options
       label: Data Mode
-      description: 'FRED for current revised data, ALFRED for vintage historical data'
+      description: FRED for current revised data, ALFRED for vintage historical 
+        data
       options:
-        - label: FRED (Current Revised Data)
-          value: FRED
-        - label: ALFRED (Vintage Historical Data)  
-          value: ALFRED
+      - label: FRED (Current Revised Data)
+        value: FRED
+      - label: ALFRED (Vintage Historical Data)
+        value: ALFRED
       default: FRED
-      
+
     - name: realtime_start
       kind: date_iso8601
       label: Realtime Start Date
-      description: Start date for ALFRED vintage data (YYYY-MM-DD). Only used when data_mode=ALFRED
-      
+      description: Start date for ALFRED vintage data (YYYY-MM-DD). Only used 
+        when data_mode=ALFRED
+
     - name: realtime_end
       kind: date_iso8601
       label: Realtime End Date
-      description: End date for ALFRED vintage data (YYYY-MM-DD). Only used when data_mode=ALFRED
+      description: End date for ALFRED vintage data (YYYY-MM-DD). Only used when
+        data_mode=ALFRED
 
-    settings_group_validation:
-    - [api_key]
+    # Configurable Selection Filters (tap-fmp style)
+    - name: category_ids
+      kind: array
+      label: Category IDs
+      description: Specific FRED category IDs to extract (e.g., ['18', '32992'] 
+        or ['*'] for all)
+
+    - name: release_ids
+      kind: array
+      label: Release IDs
+      description: Specific FRED release IDs to extract (e.g., ['53', '151'] or 
+        ['*'] for all)
+
+    - name: source_ids
+      kind: array
+      label: Source IDs
+      description: Specific FRED source IDs to extract (e.g., ['1', '3'] or 
+        ['*'] for all)
+
+    - name: tag_names
+      kind: array
+      label: Tag Names
+      description: Specific FRED tag names to extract (e.g., ['gdp', 
+        'inflation'] or ['*'] for all)
+
+    - name: search_text
+      label: Search Text
+      description: Search term for series search streams (default empty)
+    - name: enable_metadata_streams
+      kind: boolean
+      label: Enable Metadata Streams
+      description: Enable all metadata streams (categories, releases, sources, 
+        tags)
+      default: true
+
+    - name: enable_series_streams
+      kind: boolean
+      label: Enable Series Streams
+      description: Enable all series-related streams
+      default: true
+
+    - name: enable_geofred_streams
+      kind: boolean
+      label: Enable GeoFRED Streams
+      description: Enable geographic/regional data streams
+      default: true
 
     config:
       api_key: ${FRED_API_KEY}
-      series_ids: ["GDP", "UNRATE"]  # Test with just 2 series
-      api_url: 'https://api.stlouisfed.org/fred'
-      min_throttle_seconds: 1.0  # 60 requests/minute (under 120/min limit)
-      start_date: "2020-01-01"
-      
-      # ALFRED Mode Configuration for vintage data
-      data_mode: "ALFRED"  # Use vintage historical data 
-      realtime_start: "2020-06-01"  # Data as it existed on June 1, 2020
-      realtime_end: "2020-06-01"    # Same date = point-in-time vintage
-      
+      series_ids: [GDP, UNRATE]      # Small test set instead of wildcard
+      api_url: https://api.stlouisfed.org/fred
+      max_requests_per_minute: 60  # Sliding window rate limit
+      min_throttle_seconds: 1.0    # Minimum interval between consecutive requests
+      start_date: '2025-01-01'
+
+      # Test with specific IDs for pagination verification
+      category_ids: ["*"]
+      release_ids: ['53', '151']   # Gross Domestic Product (53) and Consumer Price Index (151)
+      tag_names: [gdp, quarterly]      # Test tags for related_tags streams
+      search_text: gross domestic product    # Test search text for series search streams
+      data_mode: FRED    # Set to FRED for faster testing
+      # realtime_start: "2025-01-01"  # Commented out for FRED mode
+      # realtime_end: "2025-03-01"    # Commented out for FRED mode
       # Example: Default parameters applied to all streams
       # default_params:
       #   query_params:
       #     limit: 1000
-      
       # Example: Stream-specific parameters
       # releases_params:
       #   query_params:
@@ -114,7 +176,51 @@ plugins:
       #     limit: 100
 
     select:
-      series_observations: "*"
+      # Core data streams
+    - series_observations.*
+
+      # Series metadata streams  
+    - series.*
+    - series_categories.*
+    - series_release.*
+    - series_search.*
+    - series_search_tags.*
+    - series_search_related_tags.*
+    - series_tags.*
+    - series_updates.*
+    - series_vintage_dates.*
+
+      # Category hierarchy streams
+    - categories.*
+    - category_children.*
+    - category_related.*
+    - category_series.*
+    - category_tags.*
+    - category_related_tags.*
+
+      # Release publication streams
+    - releases.*
+    - release.*
+    - release_dates.*
+    - release_series.*
+    - release_sources.*
+    - release_tags.*
+    - release_related_tags.*
+    - release_tables.*
+
+      # Data source streams
+    - sources.*
+    - source.*
+    - source_releases.*
+
+      # Topic/keyword streams
+    - tags.*
+    - related_tags.*
+    - tags_series.*
+
+      # Geographic/regional streams
+    - geofred_regional_data.*
+    - geofred_series_data.*
 
   loaders:
   - name: target-jsonl

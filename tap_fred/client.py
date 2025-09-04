@@ -1,4 +1,4 @@
-"""REST client handling, including FREDStream base class."""
+"""REST client handling, including FREDStream base class. v2024.09.04"""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ import threading
 import time
 import typing as t
 from abc import ABC
-from datetime import datetime
+from collections import deque
 import backoff
+import jsonpath_ng
 import requests
 from singer_sdk.helpers.types import Context
 from singer_sdk.streams import RESTStream
@@ -24,12 +25,20 @@ class FREDStream(RESTStream, ABC):
     records_jsonpath = "$.observations[*]"
     rest_method = "GET"
     _add_surrogate_key = False
+    _paginate = False  # Set to True in streams that need pagination
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
-        self._min_interval = float(self.config.get("min_throttle_seconds", 0.01))
+        self._max_requests_per_minute = int(
+            self.config.get("max_requests_per_minute", 60)
+        )
+        self._min_interval = float(
+            self.config.get("min_throttle_seconds", 1.0)
+        )  # Default to 1 second for 60/min
         self._throttle_lock = threading.Lock()
-        self._last_call_ts = 0.0
+        self._request_timestamps = (
+            deque()
+        )  # Track request timestamps for sliding window
 
         # Initialize configurable parameters like tap-fmp
         self.path_params = {}
@@ -60,13 +69,47 @@ class FREDStream(RESTStream, ABC):
         return re.sub(r"(api_key=)[^&\s]+", r"\1<REDACTED>", msg)
 
     def _throttle(self) -> None:
-        """Throttle requests to prevent rate limiting."""
+        """
+        Throttle requests using sliding window rate limiting to enforce max requests per minute.
+
+        This implementation:
+        1. Tracks request timestamps in a sliding 60-second window
+        2. Removes old requests outside the window
+        3. Waits if we've hit the rate limit
+        4. Also enforces minimum interval between requests
+        """
         with self._throttle_lock:
             now = time.time()
-            wait = self._last_call_ts + self._min_interval - now
-            if wait > 0:
-                time.sleep(wait + random.uniform(0, 0.1))
-            self._last_call_ts = now
+            window_start = now - 60.0  # 60-second sliding window
+
+            # Remove old request timestamps outside the window
+            while (
+                self._request_timestamps and self._request_timestamps[0] < window_start
+            ):
+                self._request_timestamps.popleft()
+
+            # Check if we've hit the rate limit
+            if len(self._request_timestamps) >= self._max_requests_per_minute:
+                # Calculate how long to wait until oldest request falls outside window
+                oldest_request = self._request_timestamps[0]
+                wait_time = oldest_request + 60.0 - now
+                if wait_time > 0:
+                    logging.info(
+                        f"Rate limit reached ({self._max_requests_per_minute}/min). Waiting {wait_time:.1f}s"
+                    )
+                    time.sleep(wait_time + random.uniform(0.1, 0.5))  # Add small jitter
+                    now = time.time()
+
+            # Also enforce minimum interval between consecutive requests
+            if self._request_timestamps:
+                last_request = self._request_timestamps[-1]
+                min_wait = last_request + self._min_interval - now
+                if min_wait > 0:
+                    time.sleep(min_wait + random.uniform(0, 0.1))
+                    now = time.time()
+
+            # Record this request timestamp
+            self._request_timestamps.append(now)
 
     @backoff.on_exception(
         backoff.expo,
@@ -74,12 +117,19 @@ class FREDStream(RESTStream, ABC):
         base=5,
         max_value=300,
         jitter=backoff.full_jitter,
-        max_tries=12,
-        max_time=1800,
+        max_tries=3,  # Reduced from 12 - give up faster
+        max_time=30,  # Reduced from 1800 - give up faster
         giveup=lambda e: (
+            # Give up on HTTP errors except for specific retryable ones
             isinstance(e, requests.exceptions.HTTPError)
             and e.response is not None
-            and e.response.status_code not in (429, 500, 502, 503, 504)
+            and (
+                400 <= e.response.status_code <= 599  # Give up on all HTTP errors
+                and e.response.status_code != 429  # Except rate limits
+                and e.response.status_code != 502  # Except bad gateway
+                and e.response.status_code != 503  # Except service unavailable
+                and e.response.status_code != 504  # Except gateway timeout
+            )
         ),
         on_backoff=lambda details: logging.warning(
             f"API request failed, retrying in {details['wait']:.1f}s "
@@ -110,12 +160,30 @@ class FREDStream(RESTStream, ABC):
                 logging.error(error_msg)
                 raise requests.exceptions.HTTPError(error_msg)
 
-            observations = data.get("observations", [])
-            logging.info(f"Stream {self.name}: Records returned: {len(observations)}")
             return data
 
         except requests.exceptions.RequestException as e:
             redacted_url = self.redact_api_key(str(e.request.url if e.request else url))
+
+            # Handle HTTP errors that we should skip gracefully
+            if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+                status_code = e.response.status_code
+
+                # Skip server errors (5xx) - return empty data so stream continues
+                if status_code >= 500:
+                    logging.warning(
+                        f"Server error {status_code} for {redacted_url}, skipping"
+                    )
+                    return {}
+
+                # Skip client errors except retryable ones
+                if 400 <= status_code < 500 and status_code not in [429, 502, 503, 504]:
+                    logging.warning(
+                        f"Client error {status_code} for {redacted_url}, skipping"
+                    )
+                    return {}
+
+            # Re-raise other errors (network issues, etc.)
             error_message = (
                 f"{e.response.status_code} Client Error: {e.response.reason} for url: {redacted_url}"
                 if e.response and hasattr(e, "request")
@@ -124,34 +192,66 @@ class FREDStream(RESTStream, ABC):
             raise requests.exceptions.HTTPError(error_message)
 
     def _add_date_filtering(self, params: dict, context: Context | None) -> None:
-        """Add incremental date filtering to request parameters."""
-        if self.replication_key:
-            replication_key_value = self.get_starting_replication_key_value(context)
-            if replication_key_value:
-                if isinstance(replication_key_value, datetime):
-                    params["observation_start"] = replication_key_value.strftime(
-                        "%Y-%m-%d"
+        """Add incremental date filtering to request parameters - only for INCREMENTAL streams."""
+        # Only add date filtering for incremental streams, not FULL_TABLE streams
+        if self.replication_method == "INCREMENTAL" and hasattr(
+            self, "_replication_key_starting_name"
+        ):
+            if self.replication_key:
+                replication_key_value = self.get_starting_replication_key_value(context)
+                if replication_key_value:
+                    params[self._replication_key_starting_name] = self._format_date(
+                        replication_key_value
                     )
-                else:
-                    params["observation_start"] = str(replication_key_value)
-        elif start_date := self.config.get("start_date"):
-            if isinstance(start_date, datetime):
-                params["observation_start"] = start_date.strftime("%Y-%m-%d")
-            else:
-                params["observation_start"] = str(start_date)[:10]
+                elif start_date := self.config.get("start_date"):
+                    params[self._replication_key_starting_name] = self._format_date(
+                        start_date
+                    )
+            elif start_date := self.config.get("start_date"):
+                params[self._replication_key_starting_name] = self._format_date(
+                    start_date
+                )
+
+    def get_url(self, context: Context | None = None) -> str:
+        return f"{self.url_base}{self.path}"
 
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
-        """Retrieve records from the API."""
-        url = f"{self.url_base}{self.path}"
+        """Retrieve records from the API - uses pagination if _paginate flag is True."""
+        if self._paginate:
+            yield from self._paginate_records(context)
+        else:
+            # Single API call for simple streams
+            url = self.get_url()
+            params = self.query_params.copy()
+            if context:
+                params.update(context)
+            self._add_date_filtering(params, context)
 
-        params = self.query_params.copy()
+            response_data = self._fetch_with_retry(url, params)
 
-        self._add_date_filtering(params, context)
+            # Extract records using JSONPath
+            jsonpath_expr = jsonpath_ng.parse(self.records_jsonpath)
+            matches = [match.value for match in jsonpath_expr.find(response_data)]
 
+            for record in matches:
+                record = self.post_process(record, context)
+                yield record
+
+    def _fetch_and_process_records(
+        self, url: str, params: dict, context: Context | None
+    ) -> t.Iterable[dict]:
+        """Common method to fetch data and process records with consistent handling."""
+        self._add_alfred_params(params)
         response_data = self._fetch_with_retry(url, params)
-        for record in response_data:
-            record = self.post_process(record, context)
-            yield record
+        records = response_data.get(self._get_records_key(), [])
+
+        for record in records:
+            yield self.post_process(record, context)
+
+    def _get_records_key(self) -> str:
+        """Override in subclasses to specify the JSON key containing records."""
+        # Default implementation - subclasses should override this
+        return "data"
 
     def post_process(self, record: dict, context: Context | None = None) -> dict:
         """Transform raw data to match expected structure."""
@@ -197,44 +297,88 @@ class FREDStream(RESTStream, ABC):
         # Add realtime parameters based on data_mode
         self._add_realtime_params()
 
+    def _is_stream_enabled(self) -> bool:
+        """Check if this stream should be enabled based on tap-fmp style configuration."""
+        # Check stream type-based enabling
+        if self.name.startswith(("series", "series_")):
+            if not self.config.get("enable_series_streams", True):
+                return False
+        elif self.name.startswith(("category", "categories")):
+            if not self.config.get("enable_metadata_streams", True):
+                return False
+        elif self.name.startswith(("release", "releases")):
+            if not self.config.get("enable_metadata_streams", True):
+                return False
+        elif self.name.startswith(("source", "sources", "tag", "tags", "related_tag")):
+            if not self.config.get("enable_metadata_streams", True):
+                return False
+        elif self.name.startswith("geofred"):
+            if not self.config.get("enable_geofred_streams", True):
+                return False
+
+        # Check specific ID-based filtering
+        if self.name.startswith("category") and "category_ids" in self.config:
+            category_ids = self.config.get("category_ids")
+            if category_ids and category_ids != "*" and category_ids != ["*"]:
+                # This stream should filter based on specific category IDs
+                # Implementation would depend on specific stream needs
+                pass
+
+        if (
+            self.name.startswith(("release", "releases"))
+            and "release_ids" in self.config
+        ):
+            release_ids = self.config.get("release_ids")
+            if release_ids and release_ids != "*" and release_ids != ["*"]:
+                # This stream should filter based on specific release IDs
+                pass
+
+        if self.name.startswith(("source", "sources")) and "source_ids" in self.config:
+            source_ids = self.config.get("source_ids")
+            if source_ids and source_ids != "*" and source_ids != ["*"]:
+                # This stream should filter based on specific source IDs
+                pass
+
+        if self.name.startswith(("tag", "tags")) and "tag_names" in self.config:
+            tag_names = self.config.get("tag_names")
+            if tag_names and tag_names != "*" and tag_names != ["*"]:
+                # This stream should filter based on specific tag names
+                pass
+
+        return True
+
+    def _format_date(self, date_value) -> str:
+        """Format date parameter consistently."""
+        if hasattr(date_value, "strftime"):
+            return date_value.strftime("%Y-%m-%d")
+        return str(date_value)[:10]
+
+    def _add_alfred_params(self, params: dict) -> None:
+        """Add ALFRED realtime parameters to params if in ALFRED mode."""
+        if self.config.get("data_mode", "FRED").upper() != "ALFRED":
+            return
+
+        realtime_start = self.config.get("realtime_start")
+        realtime_end = self.config.get("realtime_end")
+
+        if realtime_start:
+            params["realtime_start"] = self._format_date(realtime_start)
+        if realtime_end:
+            params["realtime_end"] = self._format_date(realtime_end)
+        elif realtime_start:
+            params["realtime_end"] = params["realtime_start"]
+
     def _add_realtime_params(self) -> None:
         """Add realtime parameters for FRED vs ALFRED mode."""
         data_mode = self.config.get("data_mode", "FRED").upper()
 
         if data_mode == "ALFRED":
-            # ALFRED mode: Use vintage data with specific realtime period
-            realtime_start = self.config.get("realtime_start")
-            realtime_end = self.config.get("realtime_end")
-
-            if realtime_start:
-                if hasattr(realtime_start, "strftime"):
-                    self.query_params["realtime_start"] = realtime_start.strftime(
-                        "%Y-%m-%d"
-                    )
-                else:
-                    self.query_params["realtime_start"] = str(realtime_start)[:10]
-
-            if realtime_end:
-                if hasattr(realtime_end, "strftime"):
-                    self.query_params["realtime_end"] = realtime_end.strftime(
-                        "%Y-%m-%d"
-                    )
-                else:
-                    self.query_params["realtime_end"] = str(realtime_end)[:10]
-
-            # If only one realtime param is set, use it for both start and end (point-in-time)
-            if realtime_start and not realtime_end:
-                self.query_params["realtime_end"] = self.query_params["realtime_start"]
-            elif realtime_end and not realtime_start:
-                self.query_params["realtime_start"] = self.query_params["realtime_end"]
-
+            self._add_alfred_params(self.query_params)
             logging.info(
-                f"ALFRED mode: Using vintage data from {self.query_params.get('realtime_start')} to"
+                f"ALFRED mode: Using vintage data from {self.query_params.get('realtime_start')} to "
                 f"{self.query_params.get('realtime_end')}"
             )
-
         else:
-            # FRED mode (default): Use current revised data - no realtime params needed
             logging.info("FRED mode: Using current revised data")
 
     def _fetch_all_series_ids(self) -> list[str]:
@@ -395,3 +539,114 @@ class FREDStream(RESTStream, ABC):
 
         logging.info(f"Search method found {len(all_series)} series IDs")
         return list(all_series)  # Convert set back to list
+
+    def _paginate_records(self, context: Context | None) -> t.Iterable[dict]:
+        """Shared pagination logic for FRED streams that use offset/limit."""
+        url = self.get_url()
+        offset = 0
+        limit = 1000  # Maximum allowed by FRED API
+
+        while True:
+            params = self.query_params.copy()
+            params.update(
+                {
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+
+            records_yielded = 0
+            for record in self._fetch_and_process_records(url, params, context):
+                yield record
+                records_yielded += 1
+
+            if records_yielded == 0:  # No more results
+                break
+
+            # Check if we got fewer results than requested (last page)
+            if records_yielded < limit:
+                break
+
+            offset += limit
+
+
+class TreeTraversalFREDStream(FREDStream):
+    """Base class for FRED streams that traverse hierarchical tree structures."""
+
+    def get_records(self, context: Context | None) -> t.Iterable[dict]:
+        """Traverse tree structure starting from root nodes."""
+        url = self.get_url()
+        processed_nodes = set()
+        nodes_to_process = self._get_root_nodes()
+
+        while nodes_to_process:
+            node_id = nodes_to_process.pop(0)
+
+            if node_id in processed_nodes:
+                continue
+
+            params = self.query_params.copy()
+            params.update(self._get_node_params(node_id))
+
+            for record in self._fetch_and_process_records(url, params, context):
+                yield record
+
+                child_id = self._get_child_id(record)
+                if child_id and child_id not in processed_nodes:
+                    nodes_to_process.append(child_id)
+
+            processed_nodes.add(node_id)
+
+    def _get_root_nodes(self) -> list[int]:
+        """Return starting node IDs for tree traversal."""
+        category_ids = self.config.get("category_ids", [])
+
+        # Handle empty or None
+        if not category_ids:
+            return [0]  # FRED root category
+
+        # Handle wildcard
+        if "*" in category_ids:
+            return [0]
+
+        # Handle list of specific IDs
+        try:
+            return [int(cid) for cid in category_ids]
+        except (ValueError, TypeError):
+            logging.warning(
+                f"Invalid category_ids {category_ids}, using root category 0"
+            )
+            return [0]
+
+    def _get_node_params(self, node_id) -> dict:
+        """Override to specify URL parameters for accessing a node."""
+        return {"category_id": node_id}
+
+    def _get_child_id(self, record: dict):
+        """Override to extract child ID from a record for further traversal."""
+        return record.get("id")
+
+    def _get_records_key(self) -> str:
+        """Override to specify the JSON key containing records."""
+        return "categories"
+
+
+class SeriesBasedFREDStream(FREDStream):
+    """Base class for FRED streams that operate on series data."""
+
+    def get_records(self, context: Context | None) -> t.Iterable[dict]:
+        """Process records for each configured series ID."""
+        series_ids = self._get_series_ids()
+
+        for series_id in series_ids:
+            yield from self._get_series_records(series_id, context)
+
+    def _get_series_ids(self) -> list[str]:
+        """Get series IDs from tap configuration."""
+        return self.tap.get_cached_series_ids()
+
+    def _get_series_records(
+        self, series_id: str, context: Context | None
+    ) -> t.Iterable[dict]:
+        """Override to implement series-specific record retrieval."""
+        raise NotImplementedError("Subclasses must implement _get_series_records")
