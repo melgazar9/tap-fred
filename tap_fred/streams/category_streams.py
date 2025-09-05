@@ -8,10 +8,22 @@ from singer_sdk.helpers.types import Context
 from tap_fred.client import TreeTraversalFREDStream, FREDStream
 
 
+class CategoryPartitionedStream(FREDStream):
+    """Base class for category streams that use category IDs as partitions.
+    
+    Uses explicit config or cached category IDs (for wildcard) depending on configuration.
+    """
+    
+    @property
+    def partitions(self):
+        """Generate partitions using category IDs from config or cache."""
+        return self._tap.get_cached_category_ids()
+
+
 class CategoryStream(FREDStream):
     """Stream for FRED categories - fetches individual categories using /fred/category endpoint.
     
-    Follows tap-fmp partitions pattern with thread-safe category ID caching at the tap level.
+    Thread-safe category ID caching at the tap level.
     """
 
     name = "categories"
@@ -32,7 +44,7 @@ class CategoryStream(FREDStream):
 
     @property
     def partitions(self):
-        """Generate partitions for each category ID following tap-fmp pattern."""
+        """Generate partitions for each category ID."""
         category_ids = self._tap.config.get("category_ids", ["*"])
 
         # For specific IDs, use direct partitions
@@ -100,7 +112,7 @@ class CategoryStream(FREDStream):
             yield from super().get_records(context)
 
 
-class CategoryChildrenStream(FREDStream):
+class CategoryChildrenStream(CategoryPartitionedStream):
     """Stream for FRED category relationships - /fred/category/children endpoint.
     
     Uses cached category IDs from CategoryStream instead of separate tree traversal.
@@ -121,12 +133,6 @@ class CategoryChildrenStream(FREDStream):
         """JSON key containing the records in API response."""
         return "categories"
 
-    @property
-    def partitions(self):
-        """Generate partitions using cached category IDs from CategoryStream."""
-        cached_categories = self._tap.get_cached_category_ids()
-        return [{"category_id": category["id"]} for category in cached_categories]
-
     def post_process(self, row: dict, context: Context | None = None) -> dict:
         """Add parent_id from partition context to create proper parent-child relationships."""
         # Get the parent category ID from the partition context
@@ -138,7 +144,7 @@ class CategoryChildrenStream(FREDStream):
         return super().post_process(row, context)
 
 
-class CategoryRelatedStream(TreeTraversalFREDStream):
+class CategoryRelatedStream(CategoryPartitionedStream):
     """Stream for FRED category related categories - /fred/category/related endpoint."""
 
     name = "category_related"
@@ -152,8 +158,12 @@ class CategoryRelatedStream(TreeTraversalFREDStream):
         th.Property("parent_id", th.IntegerType, description="Parent category ID"),
     ).to_dict()
 
+    def _get_records_key(self) -> str:
+        """JSON key containing the records in API response."""
+        return "categories"
 
-class CategorySeriesStream(TreeTraversalFREDStream):
+
+class CategorySeriesStream(CategoryPartitionedStream):
     """Stream for FRED series in categories - /fred/category/series endpoint."""
 
     name = "category_series"
@@ -204,12 +214,8 @@ class CategorySeriesStream(TreeTraversalFREDStream):
     def _get_records_key(self) -> str:
         return "seriess"
 
-    def _get_child_id(self, record: dict):
-        """Don't traverse child nodes - we only want series for specified categories."""
-        return None
 
-
-class CategoryTagsStream(TreeTraversalFREDStream):
+class CategoryTagsStream(CategoryPartitionedStream):
     """Stream for FRED category tags - /fred/category/tags endpoint."""
 
     name = "category_tags"
@@ -237,7 +243,7 @@ class CategoryTagsStream(TreeTraversalFREDStream):
         return "tags"
 
 
-class CategoryRelatedTagsStream(TreeTraversalFREDStream):
+class CategoryRelatedTagsStream(CategoryPartitionedStream):
     """Stream for FRED category related tags - /fred/category/related_tags endpoint.
 
     Note: This endpoint requires tag_names parameter. Stream will only be enabled
@@ -278,7 +284,6 @@ class CategoryRelatedTagsStream(TreeTraversalFREDStream):
         else:
             raise ValueError("tag_names must be a list or string")
 
-        # Add tag_names to query_params so TreeTraversalFREDStream can use it
         self.query_params.update(
             {
                 "tag_names": tag_names_str,

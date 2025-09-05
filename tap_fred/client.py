@@ -40,7 +40,7 @@ class FREDStream(RESTStream, ABC):
             deque()
         )  # Track request timestamps for sliding window
 
-        # Initialize configurable parameters like tap-fmp
+        # Initialize configurable parameters
         self.path_params = {}
         self.query_params = {}
         self.other_params = {}
@@ -267,7 +267,7 @@ class FREDStream(RESTStream, ABC):
         return record
 
     def _parse_config_params(self) -> None:
-        """Parse configurable parameters from config like tap-fmp."""
+        """Parse configurable parameters from config."""
         # Get stream-specific config first, then fall back to defaults
         stream_params = self.config.get(f"{self.name}_params")
         default_params = self.config.get("default_params")
@@ -297,7 +297,7 @@ class FREDStream(RESTStream, ABC):
         self._add_realtime_params()
 
     def _is_stream_enabled(self) -> bool:
-        """Check if this stream should be enabled based on tap-fmp style configuration."""
+        """Check if this stream should be enabled."""
         # Check stream type-based enabling
         if self.name.startswith(("series", "series_")):
             if not self.config.get("enable_series_streams", True):
@@ -379,139 +379,6 @@ class FREDStream(RESTStream, ABC):
             )
         else:
             logging.info("FRED mode: Using current revised data")
-
-    def _fetch_all_series_ids(self) -> list[str]:
-        """Fetch ALL series IDs from FRED API when wildcard is specified."""
-        logging.info("Fetching all series IDs from FRED API...")
-        all_series = set()
-
-        releases_url = f"{self.config['api_url']}/releases"
-        releases_params = {
-            "api_key": self.config["api_key"],
-            "file_type": "json",
-        }
-        
-        # Get limit from FRED API docs - releases endpoint allows 1-1000
-        releases_params["limit"] = self.config.get("releases_limit", 1000)
-
-        try:
-            releases_data = self._make_request(releases_url, releases_params)
-            releases = releases_data.get("releases", [])
-            logging.info(f"Found {len(releases)} releases")
-
-            for release in releases:
-                release_id = release["id"]
-                release_name = release.get("name", f"Release {release_id}")
-                logging.info(
-                    f"Fetching series for release {release_id}: {release_name}"
-                )
-
-                # Use pagination for series within releases
-                offset = 0
-                # Get limit from FRED API docs - release/series endpoint allows 1-1000
-                limit = self.config.get("release_series_limit", 1000)
-
-                while True:
-                    series_url = f"{self.config['api_url']}/release/series"
-                    series_params = {
-                        "release_id": release_id,
-                        "api_key": self.config["api_key"],
-                        "file_type": "json",
-                        "limit": limit,
-                        "offset": offset,
-                    }
-
-                    try:
-                        series_data = self._make_request(series_url, series_params)
-
-                        if "error_code" in series_data:
-                            logging.warning(
-                                f"FRED API Error for release {release_id}: {series_data.get('error_message', 'Unknown error')}"
-                            )
-                            break
-
-                        series_list = series_data.get("seriess", [])
-                        if not series_list:
-                            break
-
-                        for series in series_list:
-                            series_id = series.get("id")
-                            if series_id:
-                                all_series.add(series_id)
-
-                        logging.info(
-                            f"  Found {len(series_list)} series (total: {len(all_series)})"
-                        )
-
-                        if len(series_list) < limit:
-                            break
-
-                        offset += limit
-
-                    except Exception as e:
-                        logging.warning(
-                            f"Failed to fetch series for release {release_id}: {e}"
-                        )
-                        break
-
-        except Exception as e:
-            logging.error(f"Failed to fetch releases: {e}")
-            logging.info("Falling back to search method...")
-            return self._fetch_all_series_via_search()
-
-        logging.info(f"Total series IDs found: {len(all_series)}")
-        return list(all_series)
-
-    def _fetch_all_series_via_search(self) -> list[str]:
-        """Fallback method to fetch series IDs via search API with pagination."""
-        all_series = set()
-        offset = 0
-        # Get limit from FRED API docs - series/search endpoint allows 1-1000
-        limit = self.config.get("series_search_limit", 1000)
-
-        while True:
-            search_url = f"{self.config['api_url']}/series/search"
-            search_params = {
-                "search_text": "",
-                "api_key": self.config["api_key"],
-                "file_type": "json",
-                "limit": limit,
-                "offset": offset,
-            }
-
-            try:
-                search_data = self._make_request(search_url, search_params)
-
-                if "error_code" in search_data:
-                    logging.error(
-                        f"FRED API Error in search: {search_data.get('error_message', 'Unknown error')}"
-                    )
-                    break
-
-                series_list = search_data.get("seriess", [])
-                if not series_list:
-                    break
-
-                for series in series_list:
-                    series_id = series.get("id")
-                    if series_id:
-                        all_series.add(series_id)
-
-                logging.info(
-                    f"Search found {len(series_list)} series (total: {len(all_series)})"
-                )
-
-                if len(series_list) < limit:
-                    break
-
-                offset += limit
-
-            except Exception as e:
-                logging.warning(f"Search failed at offset {offset}: {e}")
-                break
-
-        logging.info(f"Search method found {len(all_series)} series IDs")
-        return list(all_series)
 
     def _paginate_records(self, context: Context | None) -> t.Iterable[dict]:
         """Shared pagination logic for FRED streams that use offset/limit."""

@@ -101,7 +101,7 @@ plugins:
       description: End date for ALFRED vintage data (YYYY-MM-DD). Only used when
         data_mode=ALFRED
 
-    # Configurable Selection Filters (tap-fmp style)
+    # Configurable Selection Filters
     - name: category_ids
       kind: array
       label: Category IDs
@@ -157,7 +157,7 @@ plugins:
       start_date: '2025-01-01'
 
       # Test with wildcard for tree traversal verification  
-      category_ids: ["*"]
+      category_ids: ["13", "125", "32073"]
       release_ids: ['*']   # Wildcard for all releases
       source_ids: ['*']           # Wildcard for all sources
       tag_names: ['*']      # Wildcard for all tags

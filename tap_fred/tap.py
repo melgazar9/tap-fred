@@ -156,12 +156,25 @@ class TapFRED(Tap):
         ),
     ).to_dict()
 
-    _series_cache = {}
-    
-    # Category caching following tap-fmp pattern
+    # Category caching
     _cached_category_ids: list[dict] | None = None
     _category_ids_stream_instance = None
     _category_ids_lock = Lock()
+    
+    # Release caching
+    _cached_release_ids: list[dict] | None = None
+    _release_ids_stream_instance = None
+    _release_ids_lock = Lock()
+    
+    # Source caching
+    _cached_source_ids: list[dict] | None = None
+    _source_ids_stream_instance = None
+    _source_ids_lock = Lock()
+    
+    # Tag names caching
+    _cached_tag_names: list[dict] | None = None
+    _tag_names_stream_instance = None
+    _tag_names_lock = Lock()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -176,90 +189,170 @@ class TapFRED(Tap):
             raise ConfigValidationError("realtime_end cannot be before realtime_start")
 
     def get_cached_series_ids(self) -> list[str]:
-        """Get cached series IDs using FREDStream client method."""
-        with self._cache_lock:
-            if not self._series_cache:
-                series_ids = self.config["series_ids"]
-
-                if series_ids == "*" or series_ids == ["*"]:
-                    series_id_stream = SeriesObservationsStream(self)
-                    series_ids = series_id_stream._fetch_all_series_ids()
-                elif isinstance(series_ids, str):
-                    if series_ids.startswith("[") and series_ids.endswith("]"):
-                        try:
-                            series_ids = json.loads(series_ids)
-                        except json.JSONDecodeError:
-                            series_ids = [series_ids]
-                    else:
-                        series_ids = [series_ids]
-                elif not isinstance(series_ids, list):
-                    raise ValueError("series_ids must be a string or list of strings")
-
-                self._series_cache = series_ids
-
-            return self._series_cache
+        """Get series IDs from configuration - simplified for current implementation."""
+        series_ids = self.config["series_ids"]
+        
+        if isinstance(series_ids, str):
+            if series_ids.startswith("[") and series_ids.endswith("]"):
+                try:
+                    series_ids = json.loads(series_ids)
+                except json.JSONDecodeError:
+                    series_ids = [series_ids]
+            else:
+                series_ids = [series_ids]
+        elif not isinstance(series_ids, list):
+            raise ValueError("series_ids must be a string or list of strings")
+        
+        return series_ids
 
     def get_category_ids_stream(self):
-        """Get CategoryStream instance for caching - follows tap-fmp pattern."""
+        """Get CategoryStream instance for caching"""
         if self._category_ids_stream_instance is None:
-            from tap_fred.streams.category_streams import CategoryStream
             self._category_ids_stream_instance = CategoryStream(self)
         return self._category_ids_stream_instance
 
+
+    def _cache_resource_ids(self, resource_type: str, discovery_stream_getter, individual_stream_class=None):
+        """Generic method to cache resource IDs following consistent pattern.
+        
+        Args:
+            resource_type: "category", "release", "source", or "tag_name"  
+            discovery_stream_getter: Function that returns discovery stream instance
+            individual_stream_class: Class for individual resource fetching (None for tags)
+        """
+        # Handle special case for tag_name vs tag_names
+        if resource_type == "tag_name":
+            cache_attr = "_cached_tag_names"
+            lock_attr = "_tag_names_lock"
+            config_key = "tag_names"
+            id_key = "tag_name"
+            data_key = "name"  # Tags use "name" field instead of "id"
+        else:
+            cache_attr = f"_cached_{resource_type}_ids"
+            lock_attr = f"_{resource_type}_ids_lock"
+            config_key = f"{resource_type}_ids"
+            id_key = f"{resource_type}_id"
+            data_key = "id"
+        
+        # Validate attributes exist
+        if not hasattr(self, cache_attr) or not hasattr(self, lock_attr):
+            raise AttributeError(f"Missing cache attributes for {resource_type}")
+        
+        cached_data = getattr(self, cache_attr)
+        if cached_data is None:
+            with getattr(self, lock_attr):
+                cached_data = getattr(self, cache_attr)
+                if cached_data is None:
+                    config_ids = self.config.get(config_key, ["*"])
+                    
+                    if config_ids == ["*"]:
+                        # Wildcard: use discovery stream
+                        self.logger.info(f"Fetching and caching {resource_type} IDs via wildcard discovery...")
+                        stream = discovery_stream_getter()
+                        data = list(stream.get_records(context=None))
+                        if data_key == "id":
+                            cached_data = [{id_key: item["id"]} for item in sorted(data, key=lambda x: x.get("id", 0))]
+                        else:  # For tags using "name"
+                            cached_data = [{id_key: item["name"]} for item in data]
+                    else:
+                        # Explicit config: call individual endpoints or use config directly
+                        self.logger.info(f"Fetching and caching specified {resource_type} IDs from meltano.yml config: {config_ids}")
+                        if individual_stream_class:
+                            stream = individual_stream_class(self)
+                            cached_items = []
+                            for item_id in config_ids:
+                                context = {id_key: int(item_id)}
+                                records = list(stream.get_records(context))
+                                cached_items.extend(records)
+                            cached_data = [{id_key: item["id"]} for item in cached_items]
+                        else:
+                            # For resources like tags that don't need individual endpoints
+                            cached_data = [{id_key: item_id} for item_id in config_ids]
+                    
+                    setattr(self, cache_attr, cached_data)
+                    self.logger.info(f"Cached {len(cached_data)} {resource_type} IDs.")
+        return cached_data
+
     def get_cached_category_ids(self):
-        """Thread-safe category ID caching following tap-fmp pattern."""
-        if self._cached_category_ids is None:
-            with self._category_ids_lock:
-                if self._cached_category_ids is None:
-                    self.logger.info("Fetching and caching category IDs...")
-                    stream = self.get_category_ids_stream()
-                    data = list(stream.get_records(context=None))
-                    self._cached_category_ids = sorted(data, key=lambda x: x.get("id", 0))
-                    self.logger.info(f"Cached {len(self._cached_category_ids)} category IDs.")
-        return self._cached_category_ids
+        """Return cached category IDs in consistent format [{'category_id': int}]."""
+        from tap_fred.streams import CategoryStream
+        return self._cache_resource_ids("category", self.get_category_ids_stream, CategoryStream)
+
+    def get_release_ids_stream(self):
+        """Get ReleasesStream instance for caching"""
+        if self._release_ids_stream_instance is None:
+            self._release_ids_stream_instance = ReleasesStream(self)
+        return self._release_ids_stream_instance
+
+    def get_cached_release_ids(self):
+        """Return cached release IDs in consistent format [{'release_id': int}]."""
+        from tap_fred.streams import ReleaseStream
+        return self._cache_resource_ids("release", self.get_release_ids_stream, ReleaseStream)
+
+    def get_source_ids_stream(self):
+        """Get SourcesStream instance for caching"""
+        if self._source_ids_stream_instance is None:
+            self._source_ids_stream_instance = SourcesStream(self)
+        return self._source_ids_stream_instance
+
+    def get_cached_source_ids(self):
+        """Return cached source IDs in consistent format [{'source_id': int}]."""
+        from tap_fred.streams import SourceStream
+        return self._cache_resource_ids("source", self.get_source_ids_stream, SourceStream)
+
+    def get_tag_names_stream(self):
+        """Get TagsStream instance for caching"""
+        if self._tag_names_stream_instance is None:
+            from tap_fred.streams import TagsStream
+            self._tag_names_stream_instance = TagsStream(self)
+        return self._tag_names_stream_instance
+
+    def get_cached_tag_names(self):
+        """Return cached tag names in consistent format [{'tag_name': str}]."""
+        return self._cache_resource_ids("tag_name", self.get_tag_names_stream, None)
 
     def discover_streams(self) -> list[FREDStream]:
         """Return a list of discovered streams - complete FRED API coverage with configurable selection."""
         return [
             # Core data stream - series observations (economic data points)
-            # SeriesObservationsStream(self),
-            # # Series-related streams
-            # SeriesStream(self),
-            # SeriesCategoriesStream(self),
-            # SeriesReleaseStream(self),
-            # SeriesSearchStream(self),
-            # SeriesSearchTagsStream(self),
-            # SeriesSearchRelatedTagsStream(self),
-            # SeriesTagsStream(self),
-            # SeriesUpdatesStream(self),
-            # SeriesVintageDatesStream(self),
-            # # Category streams (hierarchical metadata)
+            SeriesObservationsStream(self),
+            # Series-related streams
+            SeriesStream(self),
+            SeriesCategoriesStream(self),
+            SeriesReleaseStream(self),
+            SeriesSearchStream(self),
+            SeriesSearchTagsStream(self),
+            SeriesSearchRelatedTagsStream(self),
+            SeriesTagsStream(self),
+            SeriesUpdatesStream(self),
+            SeriesVintageDatesStream(self),
+            # Category streams (hierarchical metadata)
             CategoryStream(self),
-            # CategoryChildrenStream(self),
-            # CategoryRelatedStream(self),
-            # CategorySeriesStream(self),
-            # CategoryTagsStream(self),
-            # CategoryRelatedTagsStream(self),
-            # # Release streams (publication metadata)
-            # ReleasesStream(self),
-            # ReleaseStream(self),
-            # ReleaseDatesStream(self),
-            # ReleaseSeriesStream(self),
-            # ReleaseSourcesStream(self),
-            # ReleaseTagsStream(self),
-            # ReleaseRelatedTagsStream(self),
-            # ReleaseTablesStream(self),
-            # # Source streams (data provider metadata)
-            # SourcesStream(self),
-            # SourceStream(self),
-            # SourceReleasesStream(self),
-            # # Tag streams (topic/keyword metadata)
-            # TagsStream(self),
-            # RelatedTagsStream(self),
-            # TagsSeriesStream(self),
-            # # Geographic/regional data streams
-            # GeoFREDRegionalDataStream(self),
-            # GeoFREDSeriesDataStream(self),
+            CategoryChildrenStream(self),
+            CategoryRelatedStream(self),
+            CategorySeriesStream(self),
+            CategoryTagsStream(self),
+            CategoryRelatedTagsStream(self),
+            # Release streams (publication metadata)
+            ReleasesStream(self),
+            ReleaseStream(self),
+            ReleaseDatesStream(self),
+            ReleaseSeriesStream(self),
+            ReleaseSourcesStream(self),
+            ReleaseTagsStream(self),
+            ReleaseRelatedTagsStream(self),
+            ReleaseTablesStream(self),
+            # Source streams (data provider metadata)
+            SourcesStream(self),
+            SourceStream(self),
+            SourceReleasesStream(self),
+            # Tag streams (topic/keyword metadata)
+            TagsStream(self),
+            RelatedTagsStream(self),
+            TagsSeriesStream(self),
+            # Geographic/regional data streams
+            GeoFREDRegionalDataStream(self),
+            GeoFREDSeriesDataStream(self),
         ]
 
 
