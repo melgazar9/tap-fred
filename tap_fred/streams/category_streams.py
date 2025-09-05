@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import typing as t
 from singer_sdk import typing as th
-from collections import deque
-import requests.exceptions
 from singer_sdk.helpers.types import Context
 from tap_fred.client import TreeTraversalFREDStream, FREDStream
 
 
 class CategoryStream(FREDStream):
     """Stream for FRED categories - fetches individual categories using /fred/category endpoint.
-
+    
     Follows tap-fmp partitions pattern with thread-safe category ID caching at the tap level.
     """
 
@@ -28,95 +26,85 @@ class CategoryStream(FREDStream):
         th.Property("notes", th.StringType, description="Category notes/description"),
     ).to_dict()
 
+    def _get_records_key(self) -> str:
+        """JSON key containing the records in API response."""
+        return "categories"
+
     @property
     def partitions(self):
         """Generate partitions for each category ID following tap-fmp pattern."""
         category_ids = self._tap.config.get("category_ids", ["*"])
 
-        # Handle wildcard - use streaming discovery, not batch caching
-        if category_ids == ["*"]:
-            # For wildcard, override partitions and implement streaming in get_records
-            return None  # This will cause get_records to be called instead of partition processing
-        else:
-            # For specific IDs, use direct partitions
+        # For specific IDs, use direct partitions
+        if category_ids != ["*"]:
             return [{"category_id": int(cid)} for cid in category_ids if cid != "*"]
-
+        
+        # For wildcard, return None to use custom get_records()
+        return None
+    
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
-        """Override to handle streaming wildcard discovery."""
-        if self.partitions is None:  # Wildcard case
-            # Stream records as we discover categories, don't batch everything
-            self.logger.info("Streaming category discovery for wildcard selection...")
-
-            discovered_ids = []  # Cache discovered IDs for other streams
-            all_category_ids = set()
-            queue = deque([0])  # Start with root category ID per FRED docs
+        """Override to handle wildcard discovery using category/children tree traversal."""
+        category_ids = self._tap.config.get("category_ids", ["*"])
+        
+        if category_ids == ["*"]:
+            # For wildcard, use tree traversal via /category/children to discover all categories
+            from collections import deque
+            
+            discovered_ids = set()
+            queue = deque([0])  # Start with root category
             processed = set()
-            failed_count = 0
-            max_consecutive_failures = 10
-
-            while queue and failed_count < max_consecutive_failures:
+            
+            while queue:
                 category_id = queue.popleft()
                 if category_id in processed:
                     continue
-                processed.add(category_id)
-                all_category_ids.add(category_id)
-                discovered_ids.append(category_id)
-
-                # Fetch and IMMEDIATELY yield this category record
-                url = self.get_url()
-                params = self.query_params.copy()
-                params["category_id"] = category_id
-
+                
+                # First, get the category itself using /fred/category
+                category_url = self.get_url()  # /fred/category
+                category_params = self.query_params.copy()
+                category_params["category_id"] = category_id
+                
                 try:
-                    response_data = self._fetch_with_retry(url, params)
-                    categories = response_data.get("categories", [])
-
-                    # Yield records immediately as we find them
+                    category_data = self._make_request(category_url, category_params)
+                    categories = category_data.get("categories", [])
+                    
                     for category in categories:
+                        discovered_ids.add(category["id"])
                         yield self.post_process(category, context)
-
-                    # Then discover children for further traversal
-                    children_url = f"{self.url_base}/category/children"
-                    children_params = self.query_params.copy()
-                    children_params["category_id"] = category_id
-
-                    try:
-                        children_response = self._fetch_with_retry(
-                            children_url, children_params
-                        )
-                        children = children_response.get("categories", [])
-
-                        for child in children:
-                            child_id = child.get("id")
-                            if child_id and child_id not in processed:
-                                queue.append(child_id)
-                                all_category_ids.add(child_id)
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Failed to get children for category {category_id}: {e}"
-                        )
-
+                        
                 except Exception as e:
-                    self.logger.warning(f"Failed to get category {category_id}: {e}")
-                    failed_count += 1
+                    self.logger.warning(f"Failed to fetch category {category_id}: {e}")
                     continue
 
-                failed_count = 0  # Reset on success
-
-            # Cache discovered IDs for other streams to use
-            with self._tap._cache_lock:
-                self._tap._category_cache = discovered_ids
-            self.logger.info(
-                f"Cached {len(discovered_ids)} category IDs for other streams"
-            )
-
+                processed.add(category_id)
+                
+                # Then get children using /fred/category/children
+                children_url = f"{self.url_base}/category/children"
+                children_params = self.query_params.copy()
+                children_params["category_id"] = category_id
+                
+                try:
+                    children_data = self._make_request(children_url, children_params)
+                    children = children_data.get("categories", [])
+                    
+                    for child in children:
+                        child_id = child.get("id")
+                        if child_id and child_id not in processed and child_id not in discovered_ids:
+                            queue.append(child_id)
+                            
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch children for category {category_id}: {e}")
+                    continue
         else:
-            # For specific category IDs, use normal partition processing
+            # For specific IDs, use normal partition processing
             yield from super().get_records(context)
 
 
-class CategoryChildrenStream(TreeTraversalFREDStream):
-    """Stream for FRED category relationships - /fred/category/children endpoint."""
+class CategoryChildrenStream(FREDStream):
+    """Stream for FRED category relationships - /fred/category/children endpoint.
+    
+    Uses cached category IDs from CategoryStream instead of separate tree traversal.
+    """
 
     name = "category_children"
     path = "/category/children"
@@ -124,68 +112,30 @@ class CategoryChildrenStream(TreeTraversalFREDStream):
     records_jsonpath = "$.categories[*]"
 
     schema = th.PropertiesList(
-        th.Property("id", th.IntegerType, description="Category ID"),
-        th.Property("name", th.StringType, description="Category name"),
+        th.Property("id", th.IntegerType, description="Child category ID"),
+        th.Property("name", th.StringType, description="Child category name"),
         th.Property("parent_id", th.IntegerType, description="Parent category ID"),
     ).to_dict()
 
-    def _fetch_all_category_ids(self) -> list[int]:
-        """Fetch ALL category IDs using tree traversal - follows FRED API documentation."""
-        self.logger.info(
-            "Fetching all category IDs from FRED API using tree traversal..."
-        )
-        all_category_ids = set()
-        queue = deque([0])  # Start with root category ID per FRED docs
-        processed = set()
-        failed_count = 0
-        max_consecutive_failures = 10  # Prevent infinite loops on systemic API issues
+    def _get_records_key(self) -> str:
+        """JSON key containing the records in API response."""
+        return "categories"
 
-        while queue and failed_count < max_consecutive_failures:
-            category_id = queue.popleft()
-            if category_id in processed:
-                continue
-            processed.add(category_id)
-            all_category_ids.add(category_id)
+    @property
+    def partitions(self):
+        """Generate partitions using cached category IDs from CategoryStream."""
+        cached_categories = self._tap.get_cached_category_ids()
+        return [{"category_id": category["id"]} for category in cached_categories]
 
-            url = self.get_url()
-            params = self.query_params.copy()
-            params["category_id"] = category_id
-
-            try:
-                response_data = self._fetch_with_retry(url, params)
-                children = response_data.get("categories", [])
-
-                for child in children:
-                    child_id = child.get("id")
-                    if child_id and child_id not in processed:
-                        queue.append(child_id)
-                        all_category_ids.add(child_id)
-
-            except requests.exceptions.HTTPError as e:
-                if e.response and e.response.status_code >= 500:
-                    self.logger.info(
-                        f"Server error for category {category_id}: {e.response.status_code}, skipping"
-                    )
-                    failed_count += 1
-                else:
-                    self.logger.warning(f"HTTP error for category {category_id}: {e}")
-                    failed_count += 1
-                continue
-            except Exception as e:
-                self.logger.warning(
-                    f"Failed to get children for category {category_id}: {e}"
-                )
-                failed_count += 1
-                continue
-
-            # Reset failure counter on successful API call
-            failed_count = 0
-
-        sorted_ids = sorted(all_category_ids)
-        self.logger.info(
-            f"Discovered {len(sorted_ids)} total category IDs (processed: {len(processed)}, failed: {failed_count})"
-        )
-        return sorted_ids
+    def post_process(self, row: dict, context: Context | None = None) -> dict:
+        """Add parent_id from partition context to create proper parent-child relationships."""
+        # Get the parent category ID from the partition context
+        if context and "category_id" in context:
+            parent_id = context["category_id"]
+            # The returned children have their own IDs, but we need to track the parent relationship
+            row["parent_id"] = parent_id
+        
+        return super().post_process(row, context)
 
 
 class CategoryRelatedStream(TreeTraversalFREDStream):
@@ -209,7 +159,7 @@ class CategorySeriesStream(TreeTraversalFREDStream):
     name = "category_series"
     path = "/category/series"
     primary_keys: t.ClassVar[list[str]] = ["id"]
-    records_jsonpath = "$.series[*]"
+    records_jsonpath = "$.seriess[*]"
 
     schema = th.PropertiesList(
         th.Property("id", th.StringType, description="Series ID"),
@@ -318,15 +268,15 @@ class CategoryRelatedTagsStream(TreeTraversalFREDStream):
 
         # Get tag_names from config - required parameter for this endpoint
         tag_names = self.config.get("tag_names")
+        if not tag_names:
+            raise ValueError("CategoryRelatedTagsStream requires tag_names to be configured")
+            
         if isinstance(tag_names, list):
             tag_names_str = ";".join(tag_names)
         elif isinstance(tag_names, str):
             tag_names_str = tag_names
         else:
-            tag_names_str = "quarterly"  # Default common tag
-            self.logger.info(
-                f"Stream {self.name}: No tag_names configured, using default 'quarterly'"
-            )
+            raise ValueError("tag_names must be a list or string")
 
         # Add tag_names to query_params so TreeTraversalFREDStream can use it
         self.query_params.update(

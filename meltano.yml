@@ -156,10 +156,11 @@ plugins:
       min_throttle_seconds: 1.0    # Minimum interval between consecutive requests
       start_date: '2025-01-01'
 
-      # Test with specific IDs for pagination verification
+      # Test with wildcard for tree traversal verification  
       category_ids: ["*"]
-      release_ids: ['53', '151']   # Gross Domestic Product (53) and Consumer Price Index (151)
-      tag_names: [gdp, quarterly]      # Test tags for related_tags streams
+      release_ids: ['*']   # Wildcard for all releases
+      source_ids: ['*']           # Wildcard for all sources
+      tag_names: ['*']      # Wildcard for all tags
       search_text: gross domestic product    # Test search text for series search streams
       data_mode: FRED    # Set to FRED for faster testing
       # realtime_start: "2025-01-01"  # Commented out for FRED mode

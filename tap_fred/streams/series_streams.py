@@ -344,33 +344,29 @@ class SeriesSearchRelatedTagsStream(FREDStream):
     def __init__(self, tap) -> None:
         super().__init__(tap)
 
-        # Add search-specific query parameters from config
-        search_text = self.config.get("search_text", "")
-
+        # Get required parameters from config - NO DEFAULTS!
+        search_text = self.config.get("search_text")
         tag_names = self.config.get("tag_names")
+        
+        if not search_text:
+            raise ValueError(
+                "SeriesSearchRelatedTagsStream requires search_text to be configured. "
+                "No defaults are provided - search text must be explicitly configured."
+            )
+            
+        if not tag_names:
+            raise ValueError(
+                "SeriesSearchRelatedTagsStream requires tag_names to be configured. "
+                "No defaults are provided - tag names must be explicitly configured."
+            )
+
+        # Convert tag_names to string format
         if isinstance(tag_names, list):
             tag_names_str = ";".join(tag_names)
         elif isinstance(tag_names, str):
             tag_names_str = tag_names
         else:
-            tag_names_str = ""
-
-        # Set default values if not configured
-        if not search_text:
-            search_text = "gdp"  # Default search term
-            import logging
-
-            logging.info(
-                f"Stream {self.name}: No search_text configured, using default 'gdp'"
-            )
-
-        if not tag_names_str:
-            tag_names_str = "quarterly"  # Default common tag
-            import logging
-
-            logging.info(
-                f"Stream {self.name}: No tag_names configured, using default 'quarterly'"
-            )
+            raise ValueError("tag_names must be a list or string")
 
         self.query_params.update(
             {

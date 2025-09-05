@@ -136,11 +136,11 @@ class FREDStream(RESTStream, ABC):
             f"(attempt {details['tries']}): {details['exception']}"
         ),
     )
-    def _fetch_with_retry(self, url: str, query_params: dict) -> dict:
-        """Centralized API call with retry logic."""
+    def _make_request(self, url: str, params: dict) -> dict:
+        """Single centralized method for all API requests - DRY principle."""
         log_url = self.redact_api_key(url)
         log_params = {
-            k: ("<REDACTED>" if k == "api_key" else v) for k, v in query_params.items()
+            k: ("<REDACTED>" if k == "api_key" else v) for k, v in params.items()
         }
         logging.info(
             f"Stream {self.name}: Requesting: {log_url} with params: {log_params}"
@@ -149,10 +149,9 @@ class FREDStream(RESTStream, ABC):
         try:
             self._throttle()
             response = self.requests_session.get(
-                url, params=query_params, timeout=(20, 60)
+                url, params=params, timeout=(20, 60)
             )
             response.raise_for_status()
-
             data = response.json()
 
             if "error_code" in data:
@@ -165,31 +164,31 @@ class FREDStream(RESTStream, ABC):
         except requests.exceptions.RequestException as e:
             redacted_url = self.redact_api_key(str(e.request.url if e.request else url))
 
-            # Handle HTTP errors that we should skip gracefully
             if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
                 status_code = e.response.status_code
 
-                # Skip server errors (5xx) - return empty data so stream continues
                 if status_code >= 500:
                     logging.warning(
                         f"Server error {status_code} for {redacted_url}, skipping"
                     )
                     return {}
 
-                # Skip client errors except retryable ones
                 if 400 <= status_code < 500 and status_code not in [429, 502, 503, 504]:
                     logging.warning(
                         f"Client error {status_code} for {redacted_url}, skipping"
                     )
                     return {}
 
-            # Re-raise other errors (network issues, etc.)
             error_message = (
                 f"{e.response.status_code} Client Error: {e.response.reason} for url: {redacted_url}"
                 if e.response and hasattr(e, "request")
                 else self.redact_api_key(str(e))
             )
             raise requests.exceptions.HTTPError(error_message)
+
+    def _fetch_with_retry(self, url: str, query_params: dict) -> dict:
+        """Backwards compatibility wrapper - delegates to _make_request."""
+        return self._make_request(url, query_params)
 
     def _add_date_filtering(self, params: dict, context: Context | None) -> None:
         """Add incremental date filtering to request parameters - only for INCREMENTAL streams."""
@@ -227,7 +226,7 @@ class FREDStream(RESTStream, ABC):
                 params.update(context)
             self._add_date_filtering(params, context)
 
-            response_data = self._fetch_with_retry(url, params)
+            response_data = self._make_request(url, params)
 
             # Extract records using JSONPath
             jsonpath_expr = jsonpath_ng.parse(self.records_jsonpath)
@@ -242,7 +241,7 @@ class FREDStream(RESTStream, ABC):
     ) -> t.Iterable[dict]:
         """Common method to fetch data and process records with consistent handling."""
         self._add_alfred_params(params)
-        response_data = self._fetch_with_retry(url, params)
+        response_data = self._make_request(url, params)
         records = response_data.get(self._get_records_key(), [])
 
         for record in records:
@@ -384,35 +383,22 @@ class FREDStream(RESTStream, ABC):
     def _fetch_all_series_ids(self) -> list[str]:
         """Fetch ALL series IDs from FRED API when wildcard is specified."""
         logging.info("Fetching all series IDs from FRED API...")
-        all_series = set()  # Use set to avoid duplicates
+        all_series = set()
 
         releases_url = f"{self.config['api_url']}/releases"
         releases_params = {
             "api_key": self.config["api_key"],
             "file_type": "json",
-            "limit": 1000,
         }
+        
+        # Get limit from FRED API docs - releases endpoint allows 1-1000
+        releases_params["limit"] = self.config.get("releases_limit", 1000)
 
         try:
-            self._throttle()
-            response = self.requests_session.get(
-                releases_url, params=releases_params, timeout=(20, 60)
-            )
-            response.raise_for_status()
-            releases_data = response.json()
-
-            if "error_code" in releases_data:
-                error_msg = (
-                    f"FRED API Error {releases_data['error_code']}: "
-                    f"{releases_data.get('error_message', 'Unknown error')}"
-                )
-                logging.error(error_msg)
-                raise requests.exceptions.HTTPError(error_msg)
-
+            releases_data = self._make_request(releases_url, releases_params)
             releases = releases_data.get("releases", [])
             logging.info(f"Found {len(releases)} releases")
 
-            # For each release, get all series
             for release in releases:
                 release_id = release["id"]
                 release_name = release.get("name", f"Release {release_id}")
@@ -420,9 +406,10 @@ class FREDStream(RESTStream, ABC):
                     f"Fetching series for release {release_id}: {release_name}"
                 )
 
-                # Get series for this release with pagination
+                # Use pagination for series within releases
                 offset = 0
-                limit = 1000
+                # Get limit from FRED API docs - release/series endpoint allows 1-1000
+                limit = self.config.get("release_series_limit", 1000)
 
                 while True:
                     series_url = f"{self.config['api_url']}/release/series"
@@ -435,14 +422,8 @@ class FREDStream(RESTStream, ABC):
                     }
 
                     try:
-                        self._throttle()
-                        response = self.requests_session.get(
-                            series_url, params=series_params, timeout=(20, 60)
-                        )
-                        response.raise_for_status()
-                        series_data = response.json()
+                        series_data = self._make_request(series_url, series_params)
 
-                        # Handle FRED API errors
                         if "error_code" in series_data:
                             logging.warning(
                                 f"FRED API Error for release {release_id}: {series_data.get('error_message', 'Unknown error')}"
@@ -453,7 +434,6 @@ class FREDStream(RESTStream, ABC):
                         if not series_list:
                             break
 
-                        # Extract series IDs
                         for series in series_list:
                             series_id = series.get("id")
                             if series_id:
@@ -463,7 +443,6 @@ class FREDStream(RESTStream, ABC):
                             f"  Found {len(series_list)} series (total: {len(all_series)})"
                         )
 
-                        # Check if we got less than limit, meaning no more pages
                         if len(series_list) < limit:
                             break
 
@@ -477,18 +456,18 @@ class FREDStream(RESTStream, ABC):
 
         except Exception as e:
             logging.error(f"Failed to fetch releases: {e}")
-            # Fallback to search method
             logging.info("Falling back to search method...")
             return self._fetch_all_series_via_search()
 
         logging.info(f"Total series IDs found: {len(all_series)}")
-        return list(all_series)  # Convert set back to list
+        return list(all_series)
 
     def _fetch_all_series_via_search(self) -> list[str]:
         """Fallback method to fetch series IDs via search API with pagination."""
-        all_series = set()  # Use set to avoid duplicates
+        all_series = set()
         offset = 0
-        limit = 1000
+        # Get limit from FRED API docs - series/search endpoint allows 1-1000
+        limit = self.config.get("series_search_limit", 1000)
 
         while True:
             search_url = f"{self.config['api_url']}/series/search"
@@ -501,12 +480,7 @@ class FREDStream(RESTStream, ABC):
             }
 
             try:
-                self._throttle()
-                response = self.requests_session.get(
-                    search_url, params=search_params, timeout=(20, 60)
-                )
-                response.raise_for_status()
-                search_data = response.json()
+                search_data = self._make_request(search_url, search_params)
 
                 if "error_code" in search_data:
                     logging.error(
@@ -527,7 +501,6 @@ class FREDStream(RESTStream, ABC):
                     f"Search found {len(series_list)} series (total: {len(all_series)})"
                 )
 
-                # Check if we got less than limit, meaning no more pages
                 if len(series_list) < limit:
                     break
 
@@ -538,13 +511,14 @@ class FREDStream(RESTStream, ABC):
                 break
 
         logging.info(f"Search method found {len(all_series)} series IDs")
-        return list(all_series)  # Convert set back to list
+        return list(all_series)
 
     def _paginate_records(self, context: Context | None) -> t.Iterable[dict]:
         """Shared pagination logic for FRED streams that use offset/limit."""
         url = self.get_url()
         offset = 0
-        limit = 1000  # Maximum allowed by FRED API
+        # Get limit from config or use endpoint-specific defaults from FRED API docs
+        limit = self._get_pagination_limit()
 
         while True:
             params = self.query_params.copy()
@@ -560,14 +534,36 @@ class FREDStream(RESTStream, ABC):
                 yield record
                 records_yielded += 1
 
-            if records_yielded == 0:  # No more results
+            if records_yielded == 0:
                 break
 
-            # Check if we got fewer results than requested (last page)
             if records_yielded < limit:
                 break
 
             offset += limit
+
+    def _get_pagination_limit(self) -> int:
+        """Get appropriate pagination limit based on endpoint and FRED API documentation."""
+        # Stream-specific limits from config
+        stream_limit_key = f"{self.name}_limit"
+        if stream_limit_key in self.config:
+            return int(self.config[stream_limit_key])
+        
+        # Endpoint-specific defaults based on FRED API documentation
+        endpoint_defaults = {
+            "releases": 1000,
+            "sources": 1000, 
+            "tags": 1000,
+            "series_search": 1000,
+            "series_observations": 100000,  # Special case - much higher limit
+        }
+        
+        for endpoint_prefix, default_limit in endpoint_defaults.items():
+            if self.name.startswith(endpoint_prefix):
+                return default_limit
+        
+        # General default for other endpoints
+        return 1000
 
 
 class TreeTraversalFREDStream(FREDStream):

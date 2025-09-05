@@ -1,5 +1,10 @@
 # Secrets and internal config files
+
 **/.secrets/*
+
+.claude/*
+plugins/*
+.idea/*
 
 # Ignore meltano internal cache and sqlite systemdb
 

@@ -88,17 +88,19 @@ class RelatedTagsStream(FREDStream):
 
         # Get tag_names from config - required parameter for this endpoint
         tag_names = self.config.get("tag_names")
+        
+        if not tag_names:
+            raise ValueError(
+                "RelatedTagsStream requires tag_names to be configured. "
+                "No defaults are provided - all tag names must be explicitly configured."
+            )
+            
         if isinstance(tag_names, list):
             tag_names_str = ";".join(tag_names)
         elif isinstance(tag_names, str):
             tag_names_str = tag_names
         else:
-            tag_names_str = "quarterly"  # Default common tag
-            import logging
-
-            logging.info(
-                f"Stream {self.name}: No tag_names configured, using default 'quarterly'"
-            )
+            raise ValueError("tag_names must be a list or string")
 
         # Add related tags-specific query parameters
         self.query_params.update(

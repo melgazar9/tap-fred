@@ -34,7 +34,6 @@ from tap_fred.streams import (
     ReleasesStream,
     ReleaseStream,
     ReleaseDatesStream,
-    SingleReleaseDatesStream,
     ReleaseSeriesStream,
     ReleaseSourcesStream,
     ReleaseTagsStream,
@@ -158,8 +157,11 @@ class TapFRED(Tap):
     ).to_dict()
 
     _series_cache = {}
-    _category_cache = {}
-    _cache_lock = Lock()
+    
+    # Category caching following tap-fmp pattern
+    _cached_category_ids: list[dict] | None = None
+    _category_ids_stream_instance = None
+    _category_ids_lock = Lock()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -197,76 +199,67 @@ class TapFRED(Tap):
 
             return self._series_cache
 
-    def get_cached_category_ids(self) -> list[int]:
-        """Get cached category IDs using thread-safe caching pattern."""
-        with self._cache_lock:
-            if not self._category_cache:
-                category_ids = self.config.get("category_ids", ["*"])
+    def get_category_ids_stream(self):
+        """Get CategoryStream instance for caching - follows tap-fmp pattern."""
+        if self._category_ids_stream_instance is None:
+            from tap_fred.streams.category_streams import CategoryStream
+            self._category_ids_stream_instance = CategoryStream(self)
+        return self._category_ids_stream_instance
 
-                if category_ids == "*" or category_ids == ["*"]:
-                    category_stream = CategoryChildrenStream(self)
-                    category_ids = category_stream._fetch_all_category_ids()
-                elif isinstance(category_ids, str):
-                    if category_ids.startswith("[") and category_ids.endswith("]"):
-                        try:
-                            category_ids = json.loads(category_ids)
-                        except json.JSONDecodeError:
-                            category_ids = [int(category_ids)]
-                    else:
-                        category_ids = [int(category_ids)]
-                elif isinstance(category_ids, list):
-                    # Convert to integers if they're strings
-                    category_ids = [int(cid) for cid in category_ids if cid != "*"]
-                else:
-                    raise ValueError("category_ids must be a string or list of strings")
-
-                self._category_cache = category_ids
-
-            return self._category_cache
+    def get_cached_category_ids(self):
+        """Thread-safe category ID caching following tap-fmp pattern."""
+        if self._cached_category_ids is None:
+            with self._category_ids_lock:
+                if self._cached_category_ids is None:
+                    self.logger.info("Fetching and caching category IDs...")
+                    stream = self.get_category_ids_stream()
+                    data = list(stream.get_records(context=None))
+                    self._cached_category_ids = sorted(data, key=lambda x: x.get("id", 0))
+                    self.logger.info(f"Cached {len(self._cached_category_ids)} category IDs.")
+        return self._cached_category_ids
 
     def discover_streams(self) -> list[FREDStream]:
         """Return a list of discovered streams - complete FRED API coverage with configurable selection."""
         return [
             # Core data stream - series observations (economic data points)
-            SeriesObservationsStream(self),
-            # Series-related streams
-            SeriesStream(self),
-            SeriesCategoriesStream(self),
-            SeriesReleaseStream(self),
-            SeriesSearchStream(self),
-            SeriesSearchTagsStream(self),
-            SeriesSearchRelatedTagsStream(self),
-            SeriesTagsStream(self),
-            SeriesUpdatesStream(self),
-            SeriesVintageDatesStream(self),
-            # Category streams (hierarchical metadata)
+            # SeriesObservationsStream(self),
+            # # Series-related streams
+            # SeriesStream(self),
+            # SeriesCategoriesStream(self),
+            # SeriesReleaseStream(self),
+            # SeriesSearchStream(self),
+            # SeriesSearchTagsStream(self),
+            # SeriesSearchRelatedTagsStream(self),
+            # SeriesTagsStream(self),
+            # SeriesUpdatesStream(self),
+            # SeriesVintageDatesStream(self),
+            # # Category streams (hierarchical metadata)
             CategoryStream(self),
-            CategoryChildrenStream(self),
-            CategoryRelatedStream(self),
-            CategorySeriesStream(self),
-            CategoryTagsStream(self),
-            CategoryRelatedTagsStream(self),
-            # Release streams (publication metadata)
-            ReleasesStream(self),
-            ReleaseStream(self),
-            ReleaseDatesStream(self),
-            SingleReleaseDatesStream(self),
-            ReleaseSeriesStream(self),
-            ReleaseSourcesStream(self),
-            ReleaseTagsStream(self),
-            ReleaseRelatedTagsStream(self),
-            ReleaseTablesStream(self),
-            # Source streams (data provider metadata)
-            SourcesStream(self),
-            SourceStream(self),
-            SourceReleasesStream(self),
-            # Tag streams (topic/keyword metadata)
-            TagsStream(self),
-            RelatedTagsStream(self),
-            TagsSeriesStream(self),
-            # Geographic/regional data streams
-            GeoFREDRegionalDataStream(self),
-            GeoFREDSeriesDataStream(self),
+            # CategoryChildrenStream(self),
+            # CategoryRelatedStream(self),
+            # CategorySeriesStream(self),
+            # CategoryTagsStream(self),
+            # CategoryRelatedTagsStream(self),
+            # # Release streams (publication metadata)
+            # ReleasesStream(self),
+            # ReleaseStream(self),
+            # ReleaseDatesStream(self),
+            # ReleaseSeriesStream(self),
+            # ReleaseSourcesStream(self),
+            # ReleaseTagsStream(self),
+            # ReleaseRelatedTagsStream(self),
+            # ReleaseTablesStream(self),
+            # # Source streams (data provider metadata)
+            # SourcesStream(self),
+            # SourceStream(self),
+            # SourceReleasesStream(self),
+            # # Tag streams (topic/keyword metadata)
+            # TagsStream(self),
+            # RelatedTagsStream(self),
+            # TagsSeriesStream(self),
+            # # Geographic/regional data streams
+            # GeoFREDRegionalDataStream(self),
+            # GeoFREDSeriesDataStream(self),
         ]
 
 
