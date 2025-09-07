@@ -146,25 +146,30 @@ plugins:
       kind: boolean
       label: Enable GeoFRED Streams
       description: Enable geographic/regional data streams
-      default: true
+      default: false
 
     config:
       api_key: ${FRED_API_KEY}
       series_ids: [GDP, UNRATE]      # Small test set instead of wildcard
       api_url: https://api.stlouisfed.org/fred
-      max_requests_per_minute: 60  # Sliding window rate limit
-      min_throttle_seconds: 1.0    # Minimum interval between consecutive requests
+      max_requests_per_minute: 120
+      min_throttle_seconds: 1.0
       start_date: '2025-01-01'
 
-      # Test with wildcard for tree traversal verification  
-      category_ids: ["13", "125", "32073"]
-      release_ids: ['*']   # Wildcard for all releases
-      source_ids: ['*']           # Wildcard for all sources
-      tag_names: ['*']      # Wildcard for all tags
-      search_text: gross domestic product    # Test search text for series search streams
-      data_mode: FRED    # Set to FRED for faster testing
-      # realtime_start: "2025-01-01"  # Commented out for FRED mode
-      # realtime_end: "2025-03-01"    # Commented out for FRED mode
+      # Test with wildcard IDs for ALFRED mode comprehensive validation
+      category_ids:
+      - '*'
+      release_ids:
+      - '*'
+      source_ids:
+      - '*'
+      # tag_names: [nation, nsa, unemployment]  # Commented out - only for specific streams
+      # search_text: gross domestic product     # Commented out - only for specific streams
+      data_mode: ALFRED    # Test ALFRED mode for vintage data
+      realtime_start: "2025-01-15"  # Required for ALFRED mode
+      realtime_end: "2025-01-15"    # Point-in-time vintage data
+      # Stream toggles
+      enable_geofred_streams: false  # Disable problematic geofred streams for testing
       # Example: Default parameters applied to all streams
       # default_params:
       #   query_params:
@@ -176,6 +181,9 @@ plugins:
       #     sort_order: "asc"
       #     limit: 100
 
+      default_params:
+        query_params:
+          limit: 1000
     select:
       # Core data streams
     - series_observations.*
@@ -219,9 +227,9 @@ plugins:
     - related_tags.*
     - tags_series.*
 
-      # Geographic/regional streams
-    - geofred_regional_data.*
-    - geofred_series_data.*
+      # Geographic/regional streams (disabled for testing)
+    # - geofred_regional_data.*
+    # - geofred_series_data.*
 
   loaders:
   - name: target-jsonl

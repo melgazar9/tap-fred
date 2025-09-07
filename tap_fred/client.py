@@ -285,9 +285,9 @@ class FREDStream(RESTStream, ABC):
             cfg_params = {}
 
         if isinstance(cfg_params, dict):
-            self.path_params = cfg_params.get("path_params", {})
-            self.query_params = cfg_params.get("query_params", {})
-            self.other_params = cfg_params.get("other_params", {})
+            self.path_params = cfg_params.get("path_params", {}).copy()
+            self.query_params = cfg_params.get("query_params", {}).copy()
+            self.other_params = cfg_params.get("other_params", {}).copy()
 
         # Always ensure api_key is in query_params
         self.query_params["api_key"] = self.config["api_key"]
@@ -506,7 +506,7 @@ class SeriesBasedFREDStream(FREDStream):
 
     def _get_series_ids(self) -> list[str]:
         """Get series IDs from tap configuration."""
-        return self.tap.get_cached_series_ids()
+        return self._tap.get_cached_series_ids()
 
     def _get_series_records(
         self, series_id: str, context: Context | None

@@ -313,7 +313,7 @@ class TapFRED(Tap):
 
     def discover_streams(self) -> list[FREDStream]:
         """Return a list of discovered streams - complete FRED API coverage with configurable selection."""
-        return [
+        discovered_streams = [
             # Core data stream - series observations (economic data points)
             SeriesObservationsStream(self),
             # Series-related streams
@@ -322,7 +322,6 @@ class TapFRED(Tap):
             SeriesReleaseStream(self),
             SeriesSearchStream(self),
             SeriesSearchTagsStream(self),
-            SeriesSearchRelatedTagsStream(self),
             SeriesTagsStream(self),
             SeriesUpdatesStream(self),
             SeriesVintageDatesStream(self),
@@ -332,7 +331,6 @@ class TapFRED(Tap):
             CategoryRelatedStream(self),
             CategorySeriesStream(self),
             CategoryTagsStream(self),
-            CategoryRelatedTagsStream(self),
             # Release streams (publication metadata)
             ReleasesStream(self),
             ReleaseStream(self),
@@ -340,7 +338,6 @@ class TapFRED(Tap):
             ReleaseSeriesStream(self),
             ReleaseSourcesStream(self),
             ReleaseTagsStream(self),
-            ReleaseRelatedTagsStream(self),
             ReleaseTablesStream(self),
             # Source streams (data provider metadata)
             SourcesStream(self),
@@ -348,12 +345,51 @@ class TapFRED(Tap):
             SourceReleasesStream(self),
             # Tag streams (topic/keyword metadata)
             TagsStream(self),
-            RelatedTagsStream(self),
             TagsSeriesStream(self),
-            # Geographic/regional data streams
-            GeoFREDRegionalDataStream(self),
-            GeoFREDSeriesDataStream(self),
         ]
+        
+        # Conditionally add streams that require specific configuration
+        
+        # SeriesSearchRelatedTagsStream requires search_text AND tag_names
+        if self.config.get("search_text") and self.config.get("tag_names"):
+            try:
+                discovered_streams.append(SeriesSearchRelatedTagsStream(self))
+            except ValueError as e:
+                self.logger.info(f"Skipping SeriesSearchRelatedTagsStream: {e}")
+                
+        # CategoryRelatedTagsStream requires tag_names
+        if self.config.get("tag_names"):
+            try:
+                discovered_streams.append(CategoryRelatedTagsStream(self))
+            except ValueError as e:
+                self.logger.info(f"Skipping CategoryRelatedTagsStream: {e}")
+                
+        # RelatedTagsStream requires tag_names
+        if self.config.get("tag_names"):
+            try:
+                discovered_streams.append(RelatedTagsStream(self))
+            except ValueError as e:
+                self.logger.info(f"Skipping RelatedTagsStream: {e}")
+                
+        # ReleaseRelatedTagsStream requires release_ids AND tag_names
+        if self.config.get("release_ids") and self.config.get("tag_names"):
+            try:
+                discovered_streams.append(ReleaseRelatedTagsStream(self))
+            except ValueError as e:
+                self.logger.info(f"Skipping ReleaseRelatedTagsStream: {e}")
+        
+        # GeoFRED streams require specific configuration - always try to add them
+        try:
+            discovered_streams.append(GeoFREDRegionalDataStream(self))
+        except ValueError as e:
+            self.logger.info(f"Skipping GeoFREDRegionalDataStream: {e}")
+            
+        try:
+            discovered_streams.append(GeoFREDSeriesDataStream(self))
+        except ValueError as e:
+            self.logger.info(f"Skipping GeoFREDSeriesDataStream: {e}")
+        
+        return discovered_streams
 
 
 if __name__ == "__main__":
