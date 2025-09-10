@@ -175,18 +175,37 @@ class TapFRED(Tap):
     _cached_tag_names: list[dict] | None = None
     _tag_names_stream_instance = None
     _tag_names_lock = Lock()
+    
+    # Point-in-time revision dates caching
+    _cached_series_revision_dates: list[dict] | None = None
+    _series_revision_dates_lock = Lock()
+    
+    _cached_category_revision_dates: list[dict] | None = None
+    _category_revision_dates_lock = Lock()
+    
+    _cached_release_revision_dates: list[dict] | None = None
+    _release_revision_dates_lock = Lock()
+    
+    _cached_source_revision_dates: list[dict] | None = None
+    _source_revision_dates_lock = Lock()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._validate_dates()
 
     def _validate_dates(self):
-        """Validate that realtime_end is not before realtime_start."""
+        """Validate date parameters."""
+        # Validate realtime dates
         realtime_start = self.config.get("realtime_start")
         realtime_end = self.config.get("realtime_end")
-
         if realtime_start and realtime_end and realtime_end < realtime_start:
             raise ConfigValidationError("realtime_end cannot be before realtime_start")
+        
+        # Validate point-in-time dates
+        pit_start = self.config.get("point_in_time_start")
+        pit_end = self.config.get("point_in_time_end")
+        if pit_start and pit_end and pit_end < pit_start:
+            raise ConfigValidationError("point_in_time_end cannot be before point_in_time_start")
 
     def get_cached_series_ids(self) -> list[str]:
         """Get series IDs from configuration - simplified for current implementation."""
@@ -310,6 +329,95 @@ class TapFRED(Tap):
     def get_cached_tag_names(self):
         """Return cached tag names in consistent format [{'tag_name': str}]."""
         return self._cache_resource_ids("tag_name", self.get_tag_names_stream, None)
+    
+    def get_cached_series_revision_dates(self) -> list[dict]:
+        """Get cached revision dates for all series IDs."""
+        if not self.config.get("point_in_time_mode", False):
+            return []
+        
+        if self._cached_series_revision_dates is None:
+            with self._series_revision_dates_lock:
+                if self._cached_series_revision_dates is None:
+                    self.logger.info("Discovering revision dates for series IDs...")
+                    revision_data = []
+                    
+                    # Get all series IDs
+                    series_ids = self.get_cached_series_ids()
+                    self.logger.info(f"Point-in-time mode: Processing {len(series_ids)} series: {series_ids}")
+                    
+                    for series_id in series_ids:
+                        # Get vintage dates for this series
+                        vintage_dates = self._get_vintage_dates_for_series(series_id)
+                        
+                        # Filter dates if point_in_time range is specified
+                        filtered_dates = self._filter_vintage_dates(vintage_dates)
+                        
+                        if filtered_dates:
+                            self.logger.info(f"Series {series_id}: Found {len(filtered_dates)} vintage dates (first: {filtered_dates[0] if filtered_dates else 'None'}, last: {filtered_dates[-1] if filtered_dates else 'None'})")
+                            revision_data.append({
+                                'series_id': series_id,
+                                'revision_dates': filtered_dates
+                            })
+                    
+                    self._cached_series_revision_dates = revision_data
+                    self.logger.info(f"Cached revision dates for {len(revision_data)} series.")
+        
+        return self._cached_series_revision_dates
+    
+    def _get_vintage_dates_for_series(self, series_id: str) -> list[str]:
+        """Get vintage dates for a specific series ID using FRED API."""
+        # Create vintage dates stream instance
+        vintage_stream = SeriesVintageDatesStream(self)
+        
+        # Get vintage dates for this series
+        context = {"series_id": series_id}
+        records = list(vintage_stream.get_records(context))
+        
+        # Extract vintage dates from records
+        vintage_dates = []
+        for record in records:
+            if "date" in record:
+                vintage_dates.append(record["date"])
+        
+        return sorted(vintage_dates)
+    
+    def _filter_vintage_dates(self, vintage_dates: list[str]) -> list[str]:
+        """Filter vintage dates based on point_in_time_start/end configuration."""
+        if not vintage_dates:
+            return []
+        
+        start_date = self.config.get("point_in_time_start")
+        end_date = self.config.get("point_in_time_end")
+        
+        self.logger.info(f"FILTER DEBUG: start_date={start_date}, end_date={end_date}")
+        self.logger.info(f"FILTER DEBUG: Input vintage dates count: {len(vintage_dates)}")
+        if vintage_dates:
+            self.logger.info(f"FILTER DEBUG: First vintage date: {vintage_dates[0]}, Last: {vintage_dates[-1]}")
+        
+        # No filtering if no date range specified
+        if not start_date and not end_date:
+            self.logger.info("FILTER DEBUG: No date range specified, returning all vintage dates")
+            return vintage_dates
+        
+        filtered = []
+        for date_str in vintage_dates:
+            # Check if date is in range
+            include_date = True
+            
+            if start_date and date_str < start_date:
+                include_date = False
+            
+            if end_date and date_str > end_date:
+                include_date = False
+            
+            if include_date:
+                filtered.append(date_str)
+        
+        self.logger.info(f"FILTER DEBUG: Filtered vintage dates count: {len(filtered)}")
+        if filtered:
+            self.logger.info(f"FILTER DEBUG: First filtered date: {filtered[0]}, Last: {filtered[-1]}")
+        
+        return filtered
 
     def discover_streams(self) -> list[FREDStream]:
         """Return a list of discovered streams - complete FRED API coverage with configurable selection."""

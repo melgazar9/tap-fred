@@ -6,10 +6,10 @@ import typing as t
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
-from tap_fred.client import FREDStream
+from tap_fred.client import FREDStream, SourceBasedFREDStream
 
 
-class SourcesStream(FREDStream):
+class SourcesStream(SourceBasedFREDStream):
     """Stream for FRED sources - /fred/sources endpoint.
     
     Uses pagination per FRED API documentation (limit 1-1000, default 1000).
@@ -47,7 +47,7 @@ class SourcesStream(FREDStream):
         return "sources"
 
 
-class SourceStream(FREDStream):
+class SourceStream(SourceBasedFREDStream):
     """Stream for individual FRED source - /fred/source endpoint.
     
     Requires source_ids to be configured. Each source ID becomes a partition.
@@ -68,29 +68,12 @@ class SourceStream(FREDStream):
         th.Property("notes", th.StringType, description="Source notes/description"),
     ).to_dict()
 
-    @property
-    def partitions(self):
-        """Generate partitions from source_ids configuration."""
-        source_ids = self.config.get("source_ids")
-        
-        if not source_ids:
-            raise ValueError(
-                "SourceStream requires source_ids to be configured. "
-                "No defaults are provided - all source IDs must be explicitly configured."
-            )
-        
-        if source_ids == ["*"]:
-            # Use cached source IDs from tap level
-            cached_ids = self._tap.get_cached_source_ids()
-            return [{"source_id": int(sid)} for sid in cached_ids]
-        else:
-            return [{"source_id": int(sid)} for sid in source_ids if sid != "*"]
 
     def _get_records_key(self) -> str:
         return "sources"
 
 
-class SourceReleasesStream(FREDStream):
+class SourceReleasesStream(SourceBasedFREDStream):
     """Stream for FRED source releases - /fred/source/releases endpoint.
     
     Requires source_ids to be configured. Each source ID becomes a partition.
@@ -127,23 +110,6 @@ class SourceReleasesStream(FREDStream):
             "sort_order": sort_order,
         })
 
-    @property
-    def partitions(self):
-        """Generate partitions from source_ids configuration."""
-        source_ids = self.config.get("source_ids")
-        
-        if not source_ids:
-            raise ValueError(
-                "SourceReleasesStream requires source_ids to be configured. "
-                "No defaults are provided - all source IDs must be explicitly configured."
-            )
-        
-        if source_ids == ["*"]:
-            # Use cached source IDs from tap level
-            cached_ids = self._tap.get_cached_source_ids()
-            return [{"source_id": int(sid)} for sid in cached_ids]
-        else:
-            return [{"source_id": int(sid)} for sid in source_ids if sid != "*"]
 
     def _get_records_key(self) -> str:
         return "releases"

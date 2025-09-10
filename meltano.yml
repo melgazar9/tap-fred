@@ -101,6 +101,25 @@ plugins:
       description: End date for ALFRED vintage data (YYYY-MM-DD). Only used when
         data_mode=ALFRED
 
+    # Point-in-Time Mode Settings
+    - name: point_in_time_mode
+      kind: boolean
+      label: Point-in-Time Mode
+      description: Enable vintage date extraction for comprehensive backtesting data
+      default: false
+
+    - name: point_in_time_start
+      kind: date_iso8601
+      label: Point-in-Time Start Date
+      description: Start date for filtering vintage dates (YYYY-MM-DD). Only used 
+        when point_in_time_mode=true
+
+    - name: point_in_time_end
+      kind: date_iso8601
+      label: Point-in-Time End Date
+      description: End date for filtering vintage dates (YYYY-MM-DD). Only used when
+        point_in_time_mode=true
+
     # Configurable Selection Filters
     - name: category_ids
       kind: array
@@ -129,58 +148,26 @@ plugins:
     - name: search_text
       label: Search Text
       description: Search term for series search streams (default empty)
-    - name: enable_metadata_streams
-      kind: boolean
-      label: Enable Metadata Streams
-      description: Enable all metadata streams (categories, releases, sources, 
-        tags)
-      default: true
-
-    - name: enable_series_streams
-      kind: boolean
-      label: Enable Series Streams
-      description: Enable all series-related streams
-      default: true
-
-    - name: enable_geofred_streams
-      kind: boolean
-      label: Enable GeoFRED Streams
-      description: Enable geographic/regional data streams
-      default: false
 
     config:
       api_key: ${FRED_API_KEY}
-      series_ids: [GDP, UNRATE]      # Small test set instead of wildcard
       api_url: https://api.stlouisfed.org/fred
-      max_requests_per_minute: 120
+      start_date: '2020-01-01'
+      max_requests_per_minute: 60
       min_throttle_seconds: 1.0
-      start_date: '2025-01-01'
 
-      # Test with wildcard IDs for ALFRED mode comprehensive validation
-      category_ids:
-      - '*'
-      release_ids:
-      - '*'
-      source_ids:
-      - '*'
-      # tag_names: [nation, nsa, unemployment]  # Commented out - only for specific streams
-      # search_text: gross domestic product     # Commented out - only for specific streams
-      data_mode: ALFRED    # Test ALFRED mode for vintage data
-      realtime_start: "2025-01-15"  # Required for ALFRED mode
-      realtime_end: "2025-01-15"    # Point-in-time vintage data
-      # Stream toggles
-      enable_geofred_streams: false  # Disable problematic geofred streams for testing
-      # Example: Default parameters applied to all streams
-      # default_params:
-      #   query_params:
-      #     limit: 1000
-      # Example: Stream-specific parameters
-      # releases_params:
-      #   query_params:
-      #     order_by: "release_id"
-      #     sort_order: "asc"
-      #     limit: 100
-
+      series_ids: ["GDP", "UNRATE"]
+      category_ids: ["*"]
+      release_ids: ["*"]
+      source_ids: ["*"]
+      tag_names: ["*"]
+      
+      # Point-in-time mode for backtesting
+      point_in_time_mode: true
+      point_in_time_start: '2020-01-01'
+      point_in_time_end: '2021-12-31'
+      data_mode: ALFRED
+      
       default_params:
         query_params:
           limit: 1000

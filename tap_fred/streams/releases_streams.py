@@ -6,10 +6,10 @@ import typing as t
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
-from tap_fred.client import FREDStream
+from tap_fred.client import FREDStream, ReleaseBasedFREDStream
 
 
-class ReleasesStream(FREDStream):
+class ReleasesStream(ReleaseBasedFREDStream):
     """Stream for FRED releases - /fred/releases endpoint.
     
     Uses pagination per FRED API documentation (limit 1-1000, default 1000).
@@ -78,23 +78,6 @@ class ReleaseStream(FREDStream):
         th.Property("notes", th.StringType, description="Release notes/description"),
     ).to_dict()
 
-    @property
-    def partitions(self):
-        """Generate partitions from release_ids configuration."""
-        release_ids = self.config.get("release_ids")
-        
-        if not release_ids:
-            raise ValueError(
-                "ReleaseStream requires release_ids to be configured. "
-                "No defaults are provided - all release IDs must be explicitly configured."
-            )
-        
-        if release_ids == ["*"]:
-            # Use cached release IDs from tap level
-            cached_ids = self._tap.get_cached_release_ids()
-            return [{"release_id": int(rid)} for rid in cached_ids]
-        else:
-            return [{"release_id": int(rid)} for rid in release_ids if rid != "*"]
 
     def _get_records_key(self) -> str:
         return "releases"
@@ -131,7 +114,7 @@ class ReleaseDatesStream(FREDStream):
         return "release_dates"
 
 
-class ReleaseSeriesStream(FREDStream):
+class ReleaseSeriesStream(ReleaseBasedFREDStream):
     """Stream for FRED release series - /fred/release/series endpoint.
     
     Requires release_ids to be configured. Each release ID becomes a partition.
@@ -165,29 +148,12 @@ class ReleaseSeriesStream(FREDStream):
         th.Property("release_id", th.IntegerType, description="Release ID this series belongs to"),
     ).to_dict()
 
-    @property
-    def partitions(self):
-        """Generate partitions from release_ids configuration."""
-        release_ids = self.config.get("release_ids")
-        
-        if not release_ids:
-            raise ValueError(
-                "ReleaseSeriesStream requires release_ids to be configured. "
-                "No defaults are provided - all release IDs must be explicitly configured."
-            )
-        
-        if release_ids == ["*"]:
-            # Use cached release IDs from tap level
-            cached_ids = self._tap.get_cached_release_ids()
-            return [{"release_id": int(rid)} for rid in cached_ids]
-        else:
-            return [{"release_id": int(rid)} for rid in release_ids if rid != "*"]
 
     def _get_records_key(self) -> str:
         return "seriess"
 
 
-class ReleaseSourcesStream(FREDStream):
+class ReleaseSourcesStream(ReleaseBasedFREDStream):
     """Stream for FRED release sources - /fred/release/sources endpoint.
     
     Requires release_ids to be configured. Each release ID becomes a partition.
@@ -209,29 +175,12 @@ class ReleaseSourcesStream(FREDStream):
         th.Property("release_id", th.IntegerType, description="Release ID this source belongs to"),
     ).to_dict()
 
-    @property
-    def partitions(self):
-        """Generate partitions from release_ids configuration."""
-        release_ids = self.config.get("release_ids")
-        
-        if not release_ids:
-            raise ValueError(
-                "ReleaseSourcesStream requires release_ids to be configured. "
-                "No defaults are provided - all release IDs must be explicitly configured."
-            )
-        
-        if release_ids == ["*"]:
-            # Use cached release IDs from tap level
-            cached_ids = self._tap.get_cached_release_ids()
-            return [{"release_id": int(rid)} for rid in cached_ids]
-        else:
-            return [{"release_id": int(rid)} for rid in release_ids if rid != "*"]
 
     def _get_records_key(self) -> str:
         return "sources"
 
 
-class ReleaseTagsStream(FREDStream):
+class ReleaseTagsStream(ReleaseBasedFREDStream):
     """Stream for FRED release tags - /fred/release/tags endpoint.
     
     Requires release_ids to be configured. Each release ID becomes a partition.
@@ -253,23 +202,6 @@ class ReleaseTagsStream(FREDStream):
         th.Property("release_id", th.IntegerType, description="Release ID these tags belong to"),
     ).to_dict()
 
-    @property
-    def partitions(self):
-        """Generate partitions from release_ids configuration."""
-        release_ids = self.config.get("release_ids")
-        
-        if not release_ids:
-            raise ValueError(
-                "ReleaseTagsStream requires release_ids to be configured. "
-                "No defaults are provided - all release IDs must be explicitly configured."
-            )
-        
-        if release_ids == ["*"]:
-            # Use cached release IDs from tap level
-            cached_ids = self._tap.get_cached_release_ids()
-            return [{"release_id": int(rid)} for rid in cached_ids]
-        else:
-            return [{"release_id": int(rid)} for rid in release_ids if rid != "*"]
 
     def _get_records_key(self) -> str:
         return "tags"
@@ -337,7 +269,7 @@ class ReleaseRelatedTagsStream(FREDStream):
         return "tags"
 
 
-class ReleaseTablesStream(FREDStream):
+class ReleaseTablesStream(ReleaseBasedFREDStream):
     """Stream for FRED release tables - /fred/release/tables endpoint.
     
     Requires release_ids to be configured. Each release ID becomes a partition.
@@ -360,23 +292,6 @@ class ReleaseTablesStream(FREDStream):
         th.Property("level", th.StringType, description="Element level"),
     ).to_dict()
 
-    @property
-    def partitions(self):
-        """Generate partitions from release_ids configuration."""
-        release_ids = self.config.get("release_ids")
-        
-        if not release_ids:
-            raise ValueError(
-                "ReleaseTablesStream requires release_ids to be configured. "
-                "No defaults are provided - all release IDs must be explicitly configured."
-            )
-        
-        if release_ids == ["*"]:
-            # Use cached release IDs from tap level
-            cached_ids = self._tap.get_cached_release_ids()
-            return [{"release_id": int(rid)} for rid in cached_ids]
-        else:
-            return [{"release_id": int(rid)} for rid in release_ids if rid != "*"]
 
     def _get_records_key(self) -> str:
         return "elements"

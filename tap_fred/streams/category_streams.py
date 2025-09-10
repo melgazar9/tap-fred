@@ -5,19 +5,7 @@ from __future__ import annotations
 import typing as t
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
-from tap_fred.client import TreeTraversalFREDStream, FREDStream
-
-
-class CategoryPartitionedStream(FREDStream):
-    """Base class for category streams that use category IDs as partitions.
-    
-    Uses explicit config or cached category IDs (for wildcard) depending on configuration.
-    """
-    
-    @property
-    def partitions(self):
-        """Generate partitions using category IDs from config or cache."""
-        return self._tap.get_cached_category_ids()
+from tap_fred.client import TreeTraversalFREDStream, FREDStream, CategoryBasedFREDStream
 
 
 class CategoryStream(FREDStream):
@@ -112,7 +100,7 @@ class CategoryStream(FREDStream):
             yield from super().get_records(context)
 
 
-class CategoryChildrenStream(CategoryPartitionedStream):
+class CategoryChildrenStream(CategoryBasedFREDStream):
     """Stream for FRED category relationships - /fred/category/children endpoint.
     
     Uses cached category IDs from CategoryStream instead of separate tree traversal.
@@ -144,7 +132,7 @@ class CategoryChildrenStream(CategoryPartitionedStream):
         return super().post_process(row, context)
 
 
-class CategoryRelatedStream(CategoryPartitionedStream):
+class CategoryRelatedStream(CategoryBasedFREDStream):
     """Stream for FRED category related categories - /fred/category/related endpoint."""
 
     name = "category_related"
@@ -163,7 +151,7 @@ class CategoryRelatedStream(CategoryPartitionedStream):
         return "categories"
 
 
-class CategorySeriesStream(CategoryPartitionedStream):
+class CategorySeriesStream(CategoryBasedFREDStream):
     """Stream for FRED series in categories - /fred/category/series endpoint."""
 
     name = "category_series"
@@ -215,7 +203,7 @@ class CategorySeriesStream(CategoryPartitionedStream):
         return "seriess"
 
 
-class CategoryTagsStream(CategoryPartitionedStream):
+class CategoryTagsStream(CategoryBasedFREDStream):
     """Stream for FRED category tags - /fred/category/tags endpoint."""
 
     name = "category_tags"
@@ -243,7 +231,7 @@ class CategoryTagsStream(CategoryPartitionedStream):
         return "tags"
 
 
-class CategoryRelatedTagsStream(CategoryPartitionedStream):
+class CategoryRelatedTagsStream(CategoryBasedFREDStream):
     """Stream for FRED category related tags - /fred/category/related_tags endpoint.
 
     Note: This endpoint requires tag_names parameter. Stream will only be enabled

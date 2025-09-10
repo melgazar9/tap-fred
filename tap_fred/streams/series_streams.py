@@ -6,7 +6,7 @@ import typing as t
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
-from tap_fred.client import SeriesBasedFREDStream, FREDStream
+from tap_fred.client import SeriesBasedFREDStream, FREDStream, PointInTimePartitionStream
 
 
 class SeriesStream(SeriesBasedFREDStream):
@@ -56,7 +56,7 @@ class SeriesStream(SeriesBasedFREDStream):
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params)
+        self._add_alfred_params(params, context)
 
         response_data = self._fetch_with_retry(url, params)
         series_list = response_data.get("seriess", [])
@@ -92,7 +92,8 @@ class SeriesPartitionStream(SeriesBasedFREDStream):
             }
         )
 
-        self._add_alfred_params(params)
+        self._add_alfred_params(params, context)
+        
         self._add_date_filtering(params, partition_context)
 
         response_data = self._fetch_with_retry(url, params)
@@ -113,7 +114,7 @@ class SeriesPartitionStream(SeriesBasedFREDStream):
         yield from self._get_series_records(context["series_id"], context)
 
 
-class SeriesObservationsStream(SeriesPartitionStream):
+class SeriesObservationsStream(PointInTimePartitionStream):
     """Stream for FRED series observations (economic data points)."""
 
     name = "series_observations"
@@ -121,6 +122,14 @@ class SeriesObservationsStream(SeriesPartitionStream):
     primary_keys: t.ClassVar[list[str]] = ["series_id", "date"]
     replication_key = "date"
     _add_surrogate_key = False
+    
+    # Point-in-time partitioning configuration
+    _resource_type = "series"
+    _resource_id_key = "series_id"
+    
+    # Incremental replication parameters
+    _replication_key_starting_name = "observation_start"
+    _replication_key_ending_name = "observation_end"
 
     schema = th.PropertiesList(
         th.Property("series_id", th.StringType, description="FRED series identifier"),
@@ -141,6 +150,10 @@ class SeriesObservationsStream(SeriesPartitionStream):
             description="Real-time end date for this observation",
         ),
     ).to_dict()
+    
+    def _get_records_key(self) -> str:
+        """Return the JSON key that contains the records list."""
+        return "observations"
 
     def post_process(self, record: dict, context: t.Any = None) -> dict:
         """Transform raw data to match expected structure."""
@@ -182,7 +195,7 @@ class SeriesCategoriesStream(SeriesBasedFREDStream):
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params)
+        self._add_alfred_params(params, context)
 
         response_data = self._fetch_with_retry(url, params)
         categories = response_data.get("categories", [])
@@ -222,7 +235,7 @@ class SeriesReleaseStream(SeriesBasedFREDStream):
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params)
+        self._add_alfred_params(params, context)
 
         response_data = self._fetch_with_retry(url, params)
         releases = response_data.get("releases", [])
@@ -410,7 +423,7 @@ class SeriesTagsStream(SeriesBasedFREDStream):
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params)
+        self._add_alfred_params(params, context)
 
         response_data = self._fetch_with_retry(url, params)
         tags = response_data.get("tags", [])
@@ -480,7 +493,7 @@ class SeriesVintageDatesStream(SeriesBasedFREDStream):
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params)
+        self._add_alfred_params(params, context)
 
         response_data = self._fetch_with_retry(url, params)
         vintage_dates = response_data.get("vintage_dates", [])

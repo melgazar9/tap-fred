@@ -6,7 +6,7 @@ import typing as t
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
-from tap_fred.client import FREDStream
+from tap_fred.client import FREDStream, TagBasedFREDStream
 
 
 class TagsStream(FREDStream):
