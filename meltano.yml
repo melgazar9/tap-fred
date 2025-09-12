@@ -92,33 +92,34 @@ plugins:
     - name: realtime_start
       kind: date_iso8601
       label: Realtime Start Date
-      description: Start date for ALFRED vintage data (YYYY-MM-DD). Only used 
-        when data_mode=ALFRED
+      description: Global vintage date for regular ALFRED mode (YYYY-MM-DD). 
+        Used when data_mode=ALFRED and point_in_time_mode=false
 
     - name: realtime_end
       kind: date_iso8601
       label: Realtime End Date
-      description: End date for ALFRED vintage data (YYYY-MM-DD). Only used when
-        data_mode=ALFRED
+      description: End vintage date for regular ALFRED mode (YYYY-MM-DD). 
+        Used when data_mode=ALFRED and point_in_time_mode=false
 
     # Point-in-Time Mode Settings
     - name: point_in_time_mode
       kind: boolean
       label: Point-in-Time Mode
-      description: Enable vintage date extraction for comprehensive backtesting data
+      description: Enable individual vintage date partitions. When true, creates 
+        separate partitions for each vintage date within the specified range
       default: false
 
     - name: point_in_time_start
       kind: date_iso8601
       label: Point-in-Time Start Date
-      description: Start date for filtering vintage dates (YYYY-MM-DD). Only used 
-        when point_in_time_mode=true
+      description: Filter vintage dates from this date (YYYY-MM-DD). Only used 
+        when point_in_time_mode=true to limit the vintage date range
 
     - name: point_in_time_end
       kind: date_iso8601
       label: Point-in-Time End Date
-      description: End date for filtering vintage dates (YYYY-MM-DD). Only used when
-        point_in_time_mode=true
+      description: Filter vintage dates up to this date (YYYY-MM-DD). Only used when
+        point_in_time_mode=true to limit the vintage date range
 
     # Configurable Selection Filters
     - name: category_ids
@@ -153,70 +154,78 @@ plugins:
       api_key: ${FRED_API_KEY}
       api_url: https://api.stlouisfed.org/fred
       start_date: '2020-01-01'
-      max_requests_per_minute: 60
-      min_throttle_seconds: 1.0
+      max_requests_per_minute: 120
+      min_throttle_seconds: 0.5
 
       series_ids: ["GDP", "UNRATE"]
       category_ids: ["*"]
-      release_ids: ["*"]
+      release_ids: ["*"] 
       source_ids: ["*"]
       tag_names: ["*"]
       
-      # Point-in-time mode for backtesting
-      point_in_time_mode: true
-      point_in_time_start: '2020-01-01'
-      point_in_time_end: '2021-12-31'
-      data_mode: ALFRED
+      # ALFRED Mode Configuration - Historical Vintage Data
+      # ALFRED provides data as it existed on specific historical dates
+      # This prevents look-ahead bias by using only knowledge available at that time
+      # All wildcard selections enable comprehensive data discovery
+      data_mode: ALFRED                    # Historical vintage data (not current revised)
+      realtime_start: '2010-01-01'         # Start of vintage date range
+      realtime_end: '2023-12-31'           # End of vintage date range  
+      point_in_time_mode: true             # Enable vintage date filtering
+      point_in_time_start: '2020-01-01'    # Filter vintage dates from
+      point_in_time_end: '2021-12-31'      # Filter vintage dates to
       
       default_params:
         query_params:
           limit: 1000
     select:
-      # Core data streams
-    - series_observations.*
+      # All FRED API streams selected for comprehensive data extraction
+      # ALFRED mode preserves vintage dates for historical data accuracy
 
-      # Series metadata streams  
-    - series.*
-    - series_categories.*
-    - series_release.*
-    - series_search.*
-    - series_search_tags.*
-    - series_search_related_tags.*
-    - series_tags.*
-    - series_updates.*
-    - series_vintage_dates.*
+      # Core economic time series data
+    - series_observations.*         # Time series data with vintage dates
+    - series_vintage_dates.*        # Complete revision history per series
 
-      # Category hierarchy streams
-    - categories.*
-    - category_children.*
-    - category_related.*
-    - category_series.*
-    - category_tags.*
-    - category_related_tags.*
+      # Series metadata and relationships  
+    - series.*                      # Series definitions and metadata
+    - series_categories.*           # Series-to-category relationships
+    - series_release.*              # Series-to-release mapping
+    - series_search.*               # Series discovery via search
+    - series_search_tags.*          # Search-based tag relationships
+    - series_search_related_tags.*  # Related tags for search expansion
+    - series_tags.*                 # Series tagging for categorization
+    - series_updates.*              # Series update tracking
 
-      # Release publication streams
-    - releases.*
-    - release.*
-    - release_dates.*
-    - release_series.*
-    - release_sources.*
-    - release_tags.*
-    - release_related_tags.*
-    - release_tables.*
+      # Category hierarchy and taxonomy
+    - categories.*                  # Main category definitions
+    - category_children.*           # Parent-child category relationships
+    - category_related.*            # Related category discovery
+    - category_series.*             # Category-to-series mappings
+    - category_tags.*               # Category tagging system
+    - category_related_tags.*       # Related tags per category
 
-      # Data source streams
-    - sources.*
-    - source.*
-    - source_releases.*
+      # Release publications and schedules
+    - releases.*                    # Publication release definitions
+    - release.*                     # Individual release details
+    - release_dates.*               # Release publication dates
+    - release_series.*              # Release-to-series mappings
+    - release_sources.*             # Release data sources
+    - release_tags.*                # Release tagging
+    - release_related_tags.*        # Related tags per release
+    - release_tables.*              # Release table structures
 
-      # Topic/keyword streams
-    - tags.*
-    - related_tags.*
-    - tags_series.*
+      # Data sources and institutional metadata
+    - sources.*                     # Data source definitions (BLS, BEA, etc.)
+    - source.*                      # Individual source details
+    - source_releases.*             # Source-to-release relationships
 
-      # Geographic/regional streams (disabled for testing)
-    # - geofred_regional_data.*
-    # - geofred_series_data.*
+      # Topic/keyword taxonomy system
+    - tags.*                        # Tag definitions and metadata
+    - related_tags.*                # Tag relationship discovery
+    - tags_series.*                 # Tag-to-series mappings
+
+      # Geographic and regional data
+    - geofred_regional_data.*       # Regional economic indicators
+    - geofred_series_data.*         # Geographic series data
 
   loaders:
   - name: target-jsonl

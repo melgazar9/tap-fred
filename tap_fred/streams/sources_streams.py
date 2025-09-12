@@ -6,12 +6,12 @@ import typing as t
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
-from tap_fred.client import FREDStream, SourceBasedFREDStream
+from tap_fred.client import SourceBasedFREDStream
 
 
 class SourcesStream(SourceBasedFREDStream):
     """Stream for FRED sources - /fred/sources endpoint.
-    
+
     Uses pagination per FRED API documentation (limit 1-1000, default 1000).
     """
 
@@ -33,15 +33,17 @@ class SourcesStream(SourceBasedFREDStream):
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
-        
+
         # Get order_by from config - FRED API allows: source_id, name, realtime_start, realtime_end
         order_by = self.config.get("sources_order_by", "source_id")
         sort_order = self.config.get("sources_sort_order", "asc")
-        
-        self.query_params.update({
-            "order_by": order_by,
-            "sort_order": sort_order,
-        })
+
+        self.query_params.update(
+            {
+                "order_by": order_by,
+                "sort_order": sort_order,
+            }
+        )
 
     def _get_records_key(self) -> str:
         return "sources"
@@ -49,7 +51,7 @@ class SourcesStream(SourceBasedFREDStream):
 
 class SourceStream(SourceBasedFREDStream):
     """Stream for individual FRED source - /fred/source endpoint.
-    
+
     Requires source_ids to be configured. Each source ID becomes a partition.
     """
 
@@ -68,14 +70,13 @@ class SourceStream(SourceBasedFREDStream):
         th.Property("notes", th.StringType, description="Source notes/description"),
     ).to_dict()
 
-
     def _get_records_key(self) -> str:
         return "sources"
 
 
 class SourceReleasesStream(SourceBasedFREDStream):
     """Stream for FRED source releases - /fred/source/releases endpoint.
-    
+
     Requires source_ids to be configured. Each source ID becomes a partition.
     Uses pagination per FRED API documentation.
     """
@@ -95,21 +96,24 @@ class SourceReleasesStream(SourceBasedFREDStream):
         th.Property("press_release", th.BooleanType, description="Press release flag"),
         th.Property("link", th.StringType, description="Release URL link"),
         th.Property("notes", th.StringType, description="Release notes/description"),
-        th.Property("source_id", th.IntegerType, description="Source ID this release belongs to"),
+        th.Property(
+            "source_id", th.IntegerType, description="Source ID this release belongs to"
+        ),
     ).to_dict()
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
-        
+
         # Get order_by from config - FRED API allows: release_id, name, press_release, realtime_start, realtime_end
         order_by = self.config.get("source_releases_order_by", "release_id")
         sort_order = self.config.get("source_releases_sort_order", "asc")
-        
-        self.query_params.update({
-            "order_by": order_by,
-            "sort_order": sort_order,
-        })
 
+        self.query_params.update(
+            {
+                "order_by": order_by,
+                "sort_order": sort_order,
+            }
+        )
 
     def _get_records_key(self) -> str:
         return "releases"

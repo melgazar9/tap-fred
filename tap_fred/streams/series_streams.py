@@ -6,7 +6,11 @@ import typing as t
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
-from tap_fred.client import SeriesBasedFREDStream, FREDStream, PointInTimePartitionStream
+from tap_fred.client import (
+    SeriesBasedFREDStream,
+    FREDStream,
+    PointInTimePartitionStream,
+)
 
 
 class SeriesStream(SeriesBasedFREDStream):
@@ -93,8 +97,6 @@ class SeriesPartitionStream(SeriesBasedFREDStream):
         )
 
         self._add_alfred_params(params, context)
-        
-        self._add_date_filtering(params, partition_context)
 
         response_data = self._fetch_with_retry(url, params)
         records = response_data.get("observations", [])
@@ -120,16 +122,14 @@ class SeriesObservationsStream(PointInTimePartitionStream):
     name = "series_observations"
     path = "/series/observations"
     primary_keys: t.ClassVar[list[str]] = ["series_id", "date"]
-    replication_key = "date"
     _add_surrogate_key = False
-    
+
     # Point-in-time partitioning configuration
     _resource_type = "series"
     _resource_id_key = "series_id"
-    
-    # Incremental replication parameters
-    _replication_key_starting_name = "observation_start"
-    _replication_key_ending_name = "observation_end"
+
+    # Incremental replication by realtime_start (vintage publication date)
+    replication_key = "realtime_start"
 
     schema = th.PropertiesList(
         th.Property("series_id", th.StringType, description="FRED series identifier"),
@@ -150,7 +150,7 @@ class SeriesObservationsStream(PointInTimePartitionStream):
             description="Real-time end date for this observation",
         ),
     ).to_dict()
-    
+
     def _get_records_key(self) -> str:
         """Return the JSON key that contains the records list."""
         return "observations"
@@ -360,13 +360,13 @@ class SeriesSearchRelatedTagsStream(FREDStream):
         # Get required parameters from config - NO DEFAULTS!
         search_text = self.config.get("search_text")
         tag_names = self.config.get("tag_names")
-        
+
         if not search_text:
             raise ValueError(
                 "SeriesSearchRelatedTagsStream requires search_text to be configured. "
                 "No defaults are provided - search text must be explicitly configured."
             )
-            
+
         if not tag_names:
             raise ValueError(
                 "SeriesSearchRelatedTagsStream requires tag_names to be configured. "

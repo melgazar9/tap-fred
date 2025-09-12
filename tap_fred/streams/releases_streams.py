@@ -11,7 +11,7 @@ from tap_fred.client import FREDStream, ReleaseBasedFREDStream
 
 class ReleasesStream(ReleaseBasedFREDStream):
     """Stream for FRED releases - /fred/releases endpoint.
-    
+
     Uses pagination per FRED API documentation (limit 1-1000, default 1000).
     """
 
@@ -34,15 +34,17 @@ class ReleasesStream(ReleaseBasedFREDStream):
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
-        
+
         # Get order_by from config - FRED API allows: release_id, name, press_release, realtime_start, realtime_end
         order_by = self.config.get("releases_order_by", "release_id")
         sort_order = self.config.get("releases_sort_order", "asc")
-        
-        self.query_params.update({
-            "order_by": order_by,
-            "sort_order": sort_order,
-        })
+
+        self.query_params.update(
+            {
+                "order_by": order_by,
+                "sort_order": sort_order,
+            }
+        )
 
     def _get_records_key(self) -> str:
         return "releases"
@@ -58,7 +60,7 @@ class ReleasesStream(ReleaseBasedFREDStream):
 
 class ReleaseStream(FREDStream):
     """Stream for individual FRED release - /fred/release endpoint.
-    
+
     Requires release_ids to be configured. Each release ID becomes a partition.
     """
 
@@ -78,7 +80,6 @@ class ReleaseStream(FREDStream):
         th.Property("notes", th.StringType, description="Release notes/description"),
     ).to_dict()
 
-
     def _get_records_key(self) -> str:
         return "releases"
 
@@ -93,7 +94,7 @@ class ReleaseStream(FREDStream):
 
 class ReleaseDatesStream(FREDStream):
     """Stream for FRED release dates - /fred/releases/dates endpoint.
-    
+
     Uses pagination and configurable date range filtering.
     """
 
@@ -116,7 +117,7 @@ class ReleaseDatesStream(FREDStream):
 
 class ReleaseSeriesStream(ReleaseBasedFREDStream):
     """Stream for FRED release series - /fred/release/series endpoint.
-    
+
     Requires release_ids to be configured. Each release ID becomes a partition.
     Uses pagination per FRED API documentation.
     """
@@ -133,21 +134,40 @@ class ReleaseSeriesStream(ReleaseBasedFREDStream):
         th.Property("realtime_start", th.DateType, description="Real-time start date"),
         th.Property("realtime_end", th.DateType, description="Real-time end date"),
         th.Property("title", th.StringType, description="Series title"),
-        th.Property("observation_start", th.DateType, description="First observation date"),
-        th.Property("observation_end", th.DateType, description="Last observation date"),
+        th.Property(
+            "observation_start", th.DateType, description="First observation date"
+        ),
+        th.Property(
+            "observation_end", th.DateType, description="Last observation date"
+        ),
         th.Property("frequency", th.StringType, description="Data frequency"),
-        th.Property("frequency_short", th.StringType, description="Short frequency code"),
+        th.Property(
+            "frequency_short", th.StringType, description="Short frequency code"
+        ),
         th.Property("units", th.StringType, description="Data units"),
         th.Property("units_short", th.StringType, description="Short units code"),
-        th.Property("seasonal_adjustment", th.StringType, description="Seasonal adjustment"),
-        th.Property("seasonal_adjustment_short", th.StringType, description="Short seasonal adjustment code"),
-        th.Property("last_updated", th.DateTimeType, description="Last update timestamp"),
+        th.Property(
+            "seasonal_adjustment", th.StringType, description="Seasonal adjustment"
+        ),
+        th.Property(
+            "seasonal_adjustment_short",
+            th.StringType,
+            description="Short seasonal adjustment code",
+        ),
+        th.Property(
+            "last_updated", th.DateTimeType, description="Last update timestamp"
+        ),
         th.Property("popularity", th.IntegerType, description="Series popularity rank"),
-        th.Property("group_popularity", th.IntegerType, description="Group popularity score"),
+        th.Property(
+            "group_popularity", th.IntegerType, description="Group popularity score"
+        ),
         th.Property("notes", th.StringType, description="Series notes"),
-        th.Property("release_id", th.IntegerType, description="Release ID this series belongs to"),
+        th.Property(
+            "release_id",
+            th.IntegerType,
+            description="Release ID this series belongs to",
+        ),
     ).to_dict()
-
 
     def _get_records_key(self) -> str:
         return "seriess"
@@ -155,7 +175,7 @@ class ReleaseSeriesStream(ReleaseBasedFREDStream):
 
 class ReleaseSourcesStream(ReleaseBasedFREDStream):
     """Stream for FRED release sources - /fred/release/sources endpoint.
-    
+
     Requires release_ids to be configured. Each release ID becomes a partition.
     """
 
@@ -172,9 +192,12 @@ class ReleaseSourcesStream(ReleaseBasedFREDStream):
         th.Property("name", th.StringType, description="Source name"),
         th.Property("link", th.StringType, description="Source URL link"),
         th.Property("notes", th.StringType, description="Source notes/description"),
-        th.Property("release_id", th.IntegerType, description="Release ID this source belongs to"),
+        th.Property(
+            "release_id",
+            th.IntegerType,
+            description="Release ID this source belongs to",
+        ),
     ).to_dict()
-
 
     def _get_records_key(self) -> str:
         return "sources"
@@ -182,7 +205,7 @@ class ReleaseSourcesStream(ReleaseBasedFREDStream):
 
 class ReleaseTagsStream(ReleaseBasedFREDStream):
     """Stream for FRED release tags - /fred/release/tags endpoint.
-    
+
     Requires release_ids to be configured. Each release ID becomes a partition.
     """
 
@@ -198,10 +221,13 @@ class ReleaseTagsStream(ReleaseBasedFREDStream):
         th.Property("notes", th.StringType, description="Tag notes/description"),
         th.Property("created", th.DateTimeType, description="Tag creation timestamp"),
         th.Property("popularity", th.IntegerType, description="Tag popularity score"),
-        th.Property("series_count", th.IntegerType, description="Number of series with this tag"),
-        th.Property("release_id", th.IntegerType, description="Release ID these tags belong to"),
+        th.Property(
+            "series_count", th.IntegerType, description="Number of series with this tag"
+        ),
+        th.Property(
+            "release_id", th.IntegerType, description="Release ID these tags belong to"
+        ),
     ).to_dict()
-
 
     def _get_records_key(self) -> str:
         return "tags"
@@ -209,7 +235,7 @@ class ReleaseTagsStream(ReleaseBasedFREDStream):
 
 class ReleaseRelatedTagsStream(FREDStream):
     """Stream for FRED release related tags - /fred/release/related_tags endpoint.
-    
+
     Requires both release_ids and tag_names to be configured.
     Each combination becomes a partition.
     """
@@ -226,8 +252,12 @@ class ReleaseRelatedTagsStream(FREDStream):
         th.Property("notes", th.StringType, description="Tag notes/description"),
         th.Property("created", th.DateTimeType, description="Tag creation timestamp"),
         th.Property("popularity", th.IntegerType, description="Tag popularity score"),
-        th.Property("series_count", th.IntegerType, description="Number of series with this tag"),
-        th.Property("release_id", th.IntegerType, description="Release ID for related tags"),
+        th.Property(
+            "series_count", th.IntegerType, description="Number of series with this tag"
+        ),
+        th.Property(
+            "release_id", th.IntegerType, description="Release ID for related tags"
+        ),
     ).to_dict()
 
     @property
@@ -235,13 +265,13 @@ class ReleaseRelatedTagsStream(FREDStream):
         """Generate partitions from release_ids and tag_names configuration."""
         release_ids = self.config.get("release_ids")
         tag_names = self.config.get("tag_names")
-        
+
         if not release_ids:
             raise ValueError(
                 "ReleaseRelatedTagsStream requires release_ids to be configured. "
                 "No defaults are provided - all release IDs must be explicitly configured."
             )
-            
+
         if not tag_names:
             raise ValueError(
                 "ReleaseRelatedTagsStream requires tag_names to be configured. "
@@ -251,18 +281,20 @@ class ReleaseRelatedTagsStream(FREDStream):
         # Resolve wildcard release_ids
         if release_ids == ["*"]:
             release_ids = self._tap.get_cached_release_ids()
-        else:
-            release_ids = [rid for rid in release_ids if rid != "*"]
 
         # Create partitions for each combination of release_id and tag_names
         partitions = []
         for release_id in release_ids:
-            tag_names_str = ";".join(tag_names) if isinstance(tag_names, list) else str(tag_names)
-            partitions.append({
-                "release_id": int(release_id),
-                "tag_names": tag_names_str,
-            })
-        
+            tag_names_str = (
+                ";".join(tag_names) if isinstance(tag_names, list) else str(tag_names)
+            )
+            partitions.append(
+                {
+                    "release_id": int(release_id),
+                    "tag_names": tag_names_str,
+                }
+            )
+
         return partitions
 
     def _get_records_key(self) -> str:
@@ -271,7 +303,7 @@ class ReleaseRelatedTagsStream(FREDStream):
 
 class ReleaseTablesStream(ReleaseBasedFREDStream):
     """Stream for FRED release tables - /fred/release/tables endpoint.
-    
+
     Requires release_ids to be configured. Each release ID becomes a partition.
     """
 
@@ -291,7 +323,6 @@ class ReleaseTablesStream(ReleaseBasedFREDStream):
         th.Property("name", th.StringType, description="Element name"),
         th.Property("level", th.StringType, description="Element level"),
     ).to_dict()
-
 
     def _get_records_key(self) -> str:
         return "elements"

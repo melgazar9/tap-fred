@@ -6,7 +6,7 @@ import typing as t
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
-from tap_fred.client import FREDStream, TagBasedFREDStream
+from tap_fred.client import FREDStream
 
 
 class TagsStream(FREDStream):
@@ -88,13 +88,13 @@ class RelatedTagsStream(FREDStream):
 
         # Get tag_names from config - required parameter for this endpoint
         tag_names = self.config.get("tag_names")
-        
+
         if not tag_names:
             raise ValueError(
                 "RelatedTagsStream requires tag_names to be configured. "
                 "No defaults are provided - all tag names must be explicitly configured."
             )
-            
+
         if isinstance(tag_names, list):
             tag_names_str = ";".join(tag_names)
         elif isinstance(tag_names, str):
