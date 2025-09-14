@@ -6,7 +6,6 @@ from threading import Lock
 
 from singer_sdk import Tap
 from singer_sdk import typing as th
-from singer_sdk.exceptions import ConfigValidationError
 
 from tap_fred.client import FREDStream
 
@@ -88,22 +87,6 @@ class TapFRED(Tap):
             description="Custom User-Agent header to send with each request",
         ),
         th.Property(
-            "data_mode",
-            th.StringType,
-            default="FRED",
-            description="Data mode: 'FRED' for current revised data, 'ALFRED' for vintage historical data",
-        ),
-        th.Property(
-            "realtime_start",
-            th.DateTimeType,
-            description="Real-time start date for ALFRED vintage data (YYYY-MM-DD). Only used when data_mode='ALFRED'",
-        ),
-        th.Property(
-            "realtime_end",
-            th.DateTimeType,
-            description="Real-time end date for ALFRED vintage data (YYYY-MM-DD). Only used when data_mode='ALFRED'",
-        ),
-        th.Property(
             "max_requests_per_minute",
             th.IntegerType,
             default=60,
@@ -157,78 +140,41 @@ class TapFRED(Tap):
 
     # Category caching
     _cached_category_ids: list[dict] | None = None
-    _category_ids_stream_instance = None
     _category_ids_lock = Lock()
 
     # Release caching
     _cached_release_ids: list[dict] | None = None
-    _release_ids_stream_instance = None
     _release_ids_lock = Lock()
 
     # Source caching
     _cached_source_ids: list[dict] | None = None
-    _source_ids_stream_instance = None
     _source_ids_lock = Lock()
 
     # Tag names caching
     _cached_tag_names: list[dict] | None = None
-    _tag_names_stream_instance = None
     _tag_names_lock = Lock()
 
     # Series IDs caching
     _cached_series_ids: list[dict] | None = None
-    _series_ids_stream_instance = None
     _series_ids_lock = Lock()
 
-    # Point-in-time revision dates caching
-    _cached_series_revision_dates: list[dict] | None = None
-    _series_revision_dates_lock = Lock()
-
-    _cached_category_revision_dates: list[dict] | None = None
-    _category_revision_dates_lock = Lock()
-
-    _cached_release_revision_dates: list[dict] | None = None
-    _release_revision_dates_lock = Lock()
-
-    _cached_source_revision_dates: list[dict] | None = None
-    _source_revision_dates_lock = Lock()
+    # Vintage dates caching
+    _cached_vintage_dates: list[dict] | None = None
+    _vintage_dates_lock = Lock()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._validate_dates()
-
-    def _validate_dates(self):
-        """Validate date parameters."""
-        # Validate realtime dates
-        realtime_start = self.config.get("realtime_start")
-        realtime_end = self.config.get("realtime_end")
-        if realtime_start and realtime_end and realtime_end < realtime_start:
-            raise ConfigValidationError("realtime_end cannot be before realtime_start")
-
-        # Validate point-in-time dates
-        pit_start = self.config.get("point_in_time_start")
-        pit_end = self.config.get("point_in_time_end")
-        if pit_start and pit_end and pit_end < pit_start:
-            raise ConfigValidationError(
-                "point_in_time_end cannot be before point_in_time_start"
-            )
-
-    def get_series_ids_stream(self):
-        """Get SeriesStream instance for caching"""
-        if self._series_ids_stream_instance is None:
-            self._series_ids_stream_instance = SeriesStream(self)
-        return self._series_ids_stream_instance
 
     def get_cached_series_ids(self):
         """Return cached series IDs in consistent format [{'series_id': str}]."""
-        return self._cache_resource_ids(
-            "series", self.get_series_ids_stream, None
-        )
+        return self._cache_resource_ids("series", SeriesStream(self))
+
+    def get_cached_vintage_dates(self):
+        """Return cached vintage dates in consistent format [{'vintage_date': str}]."""
+        return self._cache_resource_ids("vintage_date", SeriesVintageDatesStream(self))
 
     def _discover_all_series_ids(self) -> list[str]:
         """Discover all FRED series IDs by fetching from release series endpoints."""
-        from tap_fred.streams import ReleaseSeriesStream
-
         series_ids = set()
 
         # Get all release IDs first
@@ -264,29 +210,26 @@ class TapFRED(Tap):
         self.logger.info(f"Total unique series discovered: {len(discovered_series)}")
         return discovered_series
 
-    def get_category_ids_stream(self):
-        """Get CategoryStream instance for caching"""
-        if self._category_ids_stream_instance is None:
-            self._category_ids_stream_instance = CategoryStream(self)
-        return self._category_ids_stream_instance
-
-    def _cache_resource_ids(
-        self, resource_type: str, discovery_stream_getter, individual_stream_class=None
-    ):
+    def _cache_resource_ids(self, resource_type: str, discovery_stream):
         """Generic method to cache resource IDs following consistent pattern.
 
         Args:
             resource_type: "category", "release", "source", "tag_name", or "series"
-            discovery_stream_getter: Function that returns discovery stream instance
-            individual_stream_class: Class for individual resource fetching (None for tags)
+            discovery_stream: Stream instance for discovery
         """
-        # Handle special case for tag_name vs tag_names
+        # Handle special cases
         if resource_type == "tag_name":
             cache_attr = "_cached_tag_names"
             lock_attr = "_tag_names_lock"
             config_key = "tag_names"
             id_key = "tag_name"
             data_key = "name"  # Tags use "name" field instead of "id"
+        elif resource_type == "vintage_date":
+            cache_attr = "_cached_vintage_dates"
+            lock_attr = "_vintage_dates_lock"
+            config_key = "vintage_dates"
+            id_key = "vintage_date"
+            data_key = "date"
         else:
             cache_attr = f"_cached_{resource_type}_ids"
             lock_attr = f"_{resource_type}_ids_lock"
@@ -319,8 +262,7 @@ class TapFRED(Tap):
                             ]
                         else:
                             # Standard discovery for other resource types
-                            stream = discovery_stream_getter()
-                            data = list(stream.get_records(context=None))
+                            data = list(discovery_stream.get_records(context=None))
                             if data_key == "id":
                                 cached_data = [
                                     {id_key: item["id"]}
@@ -328,6 +270,8 @@ class TapFRED(Tap):
                                         data, key=lambda x: x.get("id", 0)
                                     )
                                 ]
+                            elif data_key == "date":  # For vintage dates using "date"
+                                cached_data = [{id_key: item["date"]} for item in data]
                             else:  # For tags using "name"
                                 cached_data = [{id_key: item["name"]} for item in data]
                     else:
@@ -336,38 +280,8 @@ class TapFRED(Tap):
                             f"Fetching and caching specified {resource_type} IDs from meltano.yml config: {config_ids}"
                         )
 
-                        if resource_type == "series":
-                            # Special case: series IDs are strings, not integers
-                            if individual_stream_class:
-                                stream = individual_stream_class(self)
-                                cached_items = []
-                                for item_id in config_ids:
-                                    context = {
-                                        id_key: item_id
-                                    }  # Don't convert to int for series
-                                    records = list(stream.get_records(context))
-                                    cached_items.extend(records)
-                                cached_data = [
-                                    {id_key: item["id"]} for item in cached_items
-                                ]
-                            else:
-                                # Direct config usage for series
-                                cached_data = [
-                                    {id_key: item_id} for item_id in config_ids
-                                ]
-                        elif individual_stream_class:
-                            stream = individual_stream_class(self)
-                            cached_items = []
-                            for item_id in config_ids:
-                                context = {id_key: int(item_id)}
-                                records = list(stream.get_records(context))
-                                cached_items.extend(records)
-                            cached_data = [
-                                {id_key: item["id"]} for item in cached_items
-                            ]
-                        else:
-                            # For resources like tags that don't need individual endpoints
-                            cached_data = [{id_key: item_id} for item_id in config_ids]
+                        # Direct config usage - all resource types use config directly
+                        cached_data = [{id_key: item_id} for item_id in config_ids]
 
                     setattr(self, cache_attr, cached_data)
                     self.logger.info(f"Cached {len(cached_data)} {resource_type} IDs.")
@@ -375,141 +289,19 @@ class TapFRED(Tap):
 
     def get_cached_category_ids(self):
         """Return cached category IDs in consistent format [{'category_id': int}]."""
-        from tap_fred.streams import CategoryStream
-
-        return self._cache_resource_ids(
-            "category", self.get_category_ids_stream, CategoryStream
-        )
-
-    def get_release_ids_stream(self):
-        """Get ReleasesStream instance for caching"""
-        if self._release_ids_stream_instance is None:
-            self._release_ids_stream_instance = ReleasesStream(self)
-        return self._release_ids_stream_instance
+        return self._cache_resource_ids("category", CategoryStream(self))
 
     def get_cached_release_ids(self):
         """Return cached release IDs in consistent format [{'release_id': int}]."""
-        from tap_fred.streams import ReleaseStream
-
-        return self._cache_resource_ids(
-            "release", self.get_release_ids_stream, ReleaseStream
-        )
-
-    def get_source_ids_stream(self):
-        """Get SourcesStream instance for caching"""
-        if self._source_ids_stream_instance is None:
-            self._source_ids_stream_instance = SourcesStream(self)
-        return self._source_ids_stream_instance
+        return self._cache_resource_ids("release", ReleasesStream(self))
 
     def get_cached_source_ids(self):
         """Return cached source IDs in consistent format [{'source_id': int}]."""
-        from tap_fred.streams import SourceStream
-
-        return self._cache_resource_ids(
-            "source", self.get_source_ids_stream, SourceStream
-        )
-
-    def get_tag_names_stream(self):
-        """Get TagsStream instance for caching"""
-        if self._tag_names_stream_instance is None:
-            from tap_fred.streams import TagsStream
-
-            self._tag_names_stream_instance = TagsStream(self)
-        return self._tag_names_stream_instance
+        return self._cache_resource_ids("source", SourcesStream(self))
 
     def get_cached_tag_names(self):
         """Return cached tag names in consistent format [{'tag_name': str}]."""
-        return self._cache_resource_ids("tag_name", self.get_tag_names_stream, None)
-
-    def get_cached_series_revision_dates(self) -> list[dict]:
-        """Get cached revision dates for all series IDs."""
-        if not self.config.get("point_in_time_mode", False):
-            return []
-
-        if self._cached_series_revision_dates is None:
-            with self._series_revision_dates_lock:
-                if self._cached_series_revision_dates is None:
-                    self.logger.info("Discovering revision dates for series IDs...")
-                    revision_data = []
-
-                    # Get all series IDs
-                    cached_series = self.get_cached_series_ids()
-                    series_ids = [item["series_id"] for item in cached_series]
-                    self.logger.info(
-                        f"Point-in-time mode: Processing {len(series_ids)} series: {cached_series}"
-                    )
-
-                    for series_id in series_ids:
-                        # Get vintage dates for this series
-                        vintage_dates = self._get_vintage_dates_for_series(series_id)
-
-                        # Filter dates if point_in_time range is specified
-                        filtered_dates = self._filter_vintage_dates(vintage_dates)
-
-                        if filtered_dates:
-                            self.logger.info(
-                                f"Series {series_id}: Found {len(filtered_dates)} vintage dates "
-                                f"(first: {filtered_dates[0] if filtered_dates else 'None'}, "
-                                f"last: {filtered_dates[-1] if filtered_dates else 'None'})"
-                            )
-                            revision_data.append(
-                                {
-                                    "series_id": series_id,
-                                    "revision_dates": filtered_dates,
-                                }
-                            )
-
-                    self._cached_series_revision_dates = revision_data
-                    self.logger.info(
-                        f"Cached revision dates for {len(revision_data)} series."
-                    )
-
-        return self._cached_series_revision_dates
-
-    def _get_vintage_dates_for_series(self, series_id: str) -> list[str]:
-        """Get vintage dates for a specific series ID using FRED API."""
-        # Create vintage dates stream instance
-        vintage_stream = SeriesVintageDatesStream(self)
-
-        # Get vintage dates for this series
-        context = {"series_id": series_id}
-        records = list(vintage_stream.get_records(context))
-
-        # Extract vintage dates from records
-        vintage_dates = []
-        for record in records:
-            if "date" in record:
-                vintage_dates.append(record["date"])
-
-        return sorted(vintage_dates)
-
-    def _filter_vintage_dates(self, vintage_dates: list[str]) -> list[str]:
-        """Filter vintage dates based on point_in_time_start/end configuration."""
-        if not vintage_dates:
-            return []
-
-        start_date = self.config.get("point_in_time_start")
-        end_date = self.config.get("point_in_time_end")
-
-        # No filtering if no date range specified
-        if not start_date and not end_date:
-            return vintage_dates
-
-        filtered = []
-        for date_str in vintage_dates:
-            # Check if date is in range
-            include_date = True
-
-            if start_date and date_str < start_date:
-                include_date = False
-
-            if end_date and date_str > end_date:
-                include_date = False
-
-            if include_date:
-                filtered.append(date_str)
-
-        return filtered
+        return self._cache_resource_ids("tag_name", TagsStream(self))
 
     def discover_streams(self) -> list[FREDStream]:
         """Return a list of discovered streams - complete FRED API coverage with configurable selection."""
@@ -546,48 +338,15 @@ class TapFRED(Tap):
             # Tag streams (topic/keyword metadata)
             TagsStream(self),
             TagsSeriesStream(self),
+            # Conditional streams that require specific parameters
+            SeriesSearchRelatedTagsStream(self),
+            CategoryRelatedTagsStream(self),
+            RelatedTagsStream(self),
+            ReleaseRelatedTagsStream(self),
+            # GeoFRED streams (geographic/regional data)
+            GeoFREDRegionalDataStream(self),
+            GeoFREDSeriesDataStream(self),
         ]
-
-        # Conditionally add streams that require specific configuration
-
-        # SeriesSearchRelatedTagsStream requires search_text AND tag_names
-        if self.config.get("search_text") and self.config.get("tag_names"):
-            try:
-                discovered_streams.append(SeriesSearchRelatedTagsStream(self))
-            except ValueError as e:
-                self.logger.info(f"Skipping SeriesSearchRelatedTagsStream: {e}")
-
-        # CategoryRelatedTagsStream requires tag_names
-        if self.config.get("tag_names"):
-            try:
-                discovered_streams.append(CategoryRelatedTagsStream(self))
-            except ValueError as e:
-                self.logger.info(f"Skipping CategoryRelatedTagsStream: {e}")
-
-        # RelatedTagsStream requires tag_names
-        if self.config.get("tag_names"):
-            try:
-                discovered_streams.append(RelatedTagsStream(self))
-            except ValueError as e:
-                self.logger.info(f"Skipping RelatedTagsStream: {e}")
-
-        # ReleaseRelatedTagsStream requires release_ids AND tag_names
-        if self.config.get("release_ids") and self.config.get("tag_names"):
-            try:
-                discovered_streams.append(ReleaseRelatedTagsStream(self))
-            except ValueError as e:
-                self.logger.info(f"Skipping ReleaseRelatedTagsStream: {e}")
-
-        # GeoFRED streams require specific configuration - always try to add them
-        try:
-            discovered_streams.append(GeoFREDRegionalDataStream(self))
-        except ValueError as e:
-            self.logger.info(f"Skipping GeoFREDRegionalDataStream: {e}")
-
-        try:
-            discovered_streams.append(GeoFREDSeriesDataStream(self))
-        except ValueError as e:
-            self.logger.info(f"Skipping GeoFREDSeriesDataStream: {e}")
 
         return discovered_streams
 

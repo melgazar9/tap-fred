@@ -150,29 +150,50 @@ plugins:
       label: Search Text
       description: Search term for series search streams (default empty)
 
+    # GeoFRED Maps Configuration
+    - name: geofred_regional_params
+      kind: array
+      label: GeoFRED Regional Parameters
+      description: "Array of parameter sets for regional data extraction"
+
+    - name: geofred_series_ids
+      kind: array
+      label: GeoFRED Series IDs
+      description: "Specific GeoFRED series IDs to extract"
+
     config:
       api_key: ${FRED_API_KEY}
       api_url: https://api.stlouisfed.org/fred
-      start_date: '2020-01-01'
-      max_requests_per_minute: 120
-      min_throttle_seconds: 0.5
+      start_date: '2015-01-01'             # Historical data from 2015 for production testing
+      max_requests_per_minute: 60
+      min_throttle_seconds: 1.0
 
       series_ids: ["GDP", "UNRATE"]
-      category_ids: ["*"]
-      release_ids: ["*"] 
-      source_ids: ["*"]
-      tag_names: ["*"]
+      category_ids: ["18"]
+      release_ids: ["53"]
+      source_ids: ["1"]
+      tag_names: ["gdp"]
+
+      # Incremental Testing: FRED mode for proper bookmark advancement
+      data_mode: "FRED"
+      # realtime_start: "2019-01-01"
+      # realtime_end: "2021-01-01"
+
+      # Point-in-Time Mode disabled for incremental testing
+      point_in_time_mode: false
+      # point_in_time_start: "2020-01-01"
+      # point_in_time_end: "2020-12-31"
+      # point_in_time_start: "2020-01-01"  # Filter vintage dates from this date
+      # point_in_time_end: "2020-12-31"    # Filter vintage dates up to this date
       
-      # ALFRED Mode Configuration - Historical Vintage Data
-      # ALFRED provides data as it existed on specific historical dates
-      # This prevents look-ahead bias by using only knowledge available at that time
-      # All wildcard selections enable comprehensive data discovery
-      data_mode: ALFRED                    # Historical vintage data (not current revised)
-      realtime_start: '2010-01-01'         # Start of vintage date range
-      realtime_end: '2023-12-31'           # End of vintage date range  
-      point_in_time_mode: true             # Enable vintage date filtering
-      point_in_time_start: '2020-01-01'    # Filter vintage dates from
-      point_in_time_end: '2021-12-31'      # Filter vintage dates to
+      # GeoFRED Maps Configuration
+      geofred_regional_params:
+        - series_group: "882"
+          region_type: "state"
+          season: "SA"
+      geofred_series_ids: ["CAHOWN", "TXHOWN"]
+      
+      # Mode 5: Single Series - Minimal configuration with single IDs
       
       default_params:
         query_params:

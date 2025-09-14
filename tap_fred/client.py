@@ -39,9 +39,7 @@ class FREDStream(RESTStream, ABC):
         )  # Track request timestamps for sliding window
 
         # Initialize configurable parameters
-        self.path_params = {}
         self.query_params = {}
-        self.other_params = {}
         self._parse_config_params()
 
     @property
@@ -124,6 +122,7 @@ class FREDStream(RESTStream, ABC):
             and (
                 400 <= e.response.status_code <= 599  # Give up on all HTTP errors
                 and e.response.status_code != 429  # Except rate limits
+                and e.response.status_code != 500  # Except internal server error
                 and e.response.status_code != 502  # Except bad gateway
                 and e.response.status_code != 503  # Except service unavailable
                 and e.response.status_code != 504  # Except gateway timeout
@@ -172,14 +171,29 @@ class FREDStream(RESTStream, ABC):
         except requests.exceptions.RequestException as e:
             redacted_url = self.redact_api_key(str(e.request.url if e.request else url))
 
+            # Handle timeout exceptions - let backoff retry them
+            if isinstance(
+                e,
+                (
+                    requests.exceptions.ReadTimeout,
+                    requests.exceptions.ConnectTimeout,
+                    requests.exceptions.Timeout,
+                ),
+            ):
+                logging.warning(
+                    f"Request timeout for {redacted_url}, will retry if attempts remain"
+                )
+                raise e
+
             if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
                 status_code = e.response.status_code
 
                 if status_code >= 500:
+                    # 500-level errors indicate server issues - let backoff retry them
                     logging.warning(
-                        f"Server error {status_code} for {redacted_url}, skipping"
+                        f"Server error {status_code} for {redacted_url}, will retry if attempts remain"
                     )
-                    return {}
+                    raise e
 
                 if 400 <= status_code < 500 and status_code not in [429, 502, 503, 504]:
                     logging.warning(
@@ -212,8 +226,6 @@ class FREDStream(RESTStream, ABC):
             if context:
                 params.update(context)
 
-            # Ensure ALFRED parameters are added for all streams
-            self._add_alfred_params(params, context)
             response_data = self._make_request(url, params)
 
             # Extract records using JSONPath
@@ -228,7 +240,6 @@ class FREDStream(RESTStream, ABC):
         self, url: str, params: dict, context: Context | None
     ) -> t.Iterable[dict]:
         """Common method to fetch data and process records with consistent handling."""
-        self._add_alfred_params(params, context)
         response_data = self._make_request(url, params)
         records = response_data.get(self._get_records_key(), [])
 
@@ -248,6 +259,35 @@ class FREDStream(RESTStream, ABC):
         for key, value in record.items():
             if value == ".":
                 record[key] = None
+
+        # Convert common integer fields to proper types for schema validation
+        integer_fields = [
+            "id",
+            "parent_id",
+            "category_id",
+            "release_id",
+            "source_id",
+            "popularity",
+            "series_count",
+            "group_popularity",
+        ]
+        for field in integer_fields:
+            if field in record and record[field] is not None:
+                try:
+                    record[field] = int(record[field])
+                except (ValueError, TypeError):
+                    pass  # Keep original value if conversion fails
+
+        # Add context-based fields (e.g., category_id from partition context)
+        if context:
+            # Integer IDs for categories, releases, and sources
+            for key in ["category_id", "release_id", "source_id"]:
+                if key in context and context[key] is not None:
+                    record[key] = int(context[key])
+
+            # String IDs for series (e.g., "GDP", "UNRATE")
+            if "series_id" in context and context["series_id"] is not None:
+                record["series_id"] = str(context["series_id"])
 
         if self._add_surrogate_key:
             record["surrogate_key"] = generate_surrogate_key(record)
@@ -273,9 +313,7 @@ class FREDStream(RESTStream, ABC):
             cfg_params = {}
 
         if isinstance(cfg_params, dict):
-            self.path_params = cfg_params.get("path_params", {}).copy()
             self.query_params = cfg_params.get("query_params", {}).copy()
-            self.other_params = cfg_params.get("other_params", {}).copy()
 
         # Always ensure api_key is in query_params
         self.query_params["api_key"] = self.config["api_key"]
@@ -284,117 +322,33 @@ class FREDStream(RESTStream, ABC):
         # Add realtime parameters based on data_mode
         self._add_realtime_params()
 
-    def _is_stream_enabled(self) -> bool:
-        """Check if this stream should be enabled."""
-        # Check stream type-based enabling
-        if self.name.startswith(("series", "series_")):
-            if not self.config.get("enable_series_streams", True):
-                return False
-        elif self.name.startswith(("category", "categories")):
-            if not self.config.get("enable_metadata_streams", True):
-                return False
-        elif self.name.startswith(("release", "releases")):
-            if not self.config.get("enable_metadata_streams", True):
-                return False
-        elif self.name.startswith(("source", "sources", "tag", "tags", "related_tag")):
-            if not self.config.get("enable_metadata_streams", True):
-                return False
-        elif self.name.startswith("geofred"):
-            if not self.config.get("enable_geofred_streams", True):
-                return False
-
-        # Check specific ID-based filtering
-        if self.name.startswith("category") and "category_ids" in self.config:
-            category_ids = self.config.get("category_ids")
-            if category_ids and category_ids != ["*"]:
-                # This stream should filter based on specific category IDs
-                # Implementation would depend on specific stream needs
-                pass
-
-        if (
-            self.name.startswith(("release", "releases"))
-            and "release_ids" in self.config
-        ):
-            release_ids = self.config.get("release_ids")
-            if release_ids and release_ids != ["*"]:
-                # This stream should filter based on specific release IDs
-                pass
-
-        if self.name.startswith(("source", "sources")) and "source_ids" in self.config:
-            source_ids = self.config.get("source_ids")
-            if source_ids and source_ids != ["*"]:
-                # This stream should filter based on specific source IDs
-                pass
-
-        if self.name.startswith(("tag", "tags")) and "tag_names" in self.config:
-            tag_names = self.config.get("tag_names")
-            if tag_names and tag_names != ["*"]:
-                # This stream should filter based on specific tag names
-                pass
-
-        return True
-
     def _format_date(self, date_value) -> str:
         """Format date parameter consistently."""
         if hasattr(date_value, "strftime"):
             return date_value.strftime("%Y-%m-%d")
         return str(date_value)[:10]
 
-    def _add_alfred_params(self, params: dict, context: dict = None) -> None:
-        """Add ALFRED realtime parameters to params if in ALFRED mode.
-
-        Parameter Usage:
-        - realtime_start/realtime_end: Global config used for regular ALFRED mode
-        - point_in_time_start/point_in_time_end: Filter vintage dates when point_in_time_mode=true
-        - vintage_date in context: Individual partition vintage date (overrides global config)
-        """
-        # Handle point-in-time mode with vintage dates from context
-        if context and "vintage_date" in context:
-            # Point-in-time mode: use vintage_date for realtime parameters (ALFRED mode)
-            vintage_date = context["vintage_date"]
-            params.update(
-                {
-                    "realtime_start": vintage_date,
-                    "realtime_end": vintage_date,
-                }
-            )
-            return
-
-        # Regular ALFRED mode: use global config
-        if self.config["data_mode"].upper() != "ALFRED":
-            return
-
-        realtime_start = self.config.get("realtime_start")  # Optional
-        realtime_end = self.config.get("realtime_end")  # Optional
-
-        if realtime_start:
-            params["realtime_start"] = self._format_date(realtime_start)
-        if realtime_end:
-            params["realtime_end"] = self._format_date(realtime_end)
-        elif realtime_start:
-            params["realtime_end"] = params["realtime_start"]
-
     def _add_realtime_params(self) -> None:
-        """Add realtime parameters for FRED vs ALFRED mode."""
-        data_mode = self.config["data_mode"].upper()
+        """Add ALFRED realtime parameters for point-in-time accuracy."""
+        data_mode = self.config.get("data_mode", "FRED")
 
         if data_mode == "ALFRED":
-            self._add_alfred_params(self.query_params)
-            if self.config.get("realtime_start") and not self.config.get(
-                "point_in_time_mode"
-            ):
-                realtime_end = (
-                    self.config.get("realtime_end") or self.config["realtime_start"]
-                )
-                logging.info(
-                    f"ALFRED mode: Using vintage data from {self.config['realtime_start']} to {realtime_end}"
-                )
-            elif self.config.get("point_in_time_mode"):
-                logging.info(
-                    "ALFRED mode: Point-in-time partitions will set vintage dates per partition"
-                )
-        else:
-            logging.info("FRED mode: Using current revised data")
+            realtime_start = self.config.get("realtime_start")
+            realtime_end = self.config.get("realtime_end")
+
+            if realtime_start:
+                self.query_params["realtime_start"] = realtime_start
+
+            if realtime_end:
+                self.query_params["realtime_end"] = realtime_end
+            elif realtime_start:
+                # If only start date provided, use same date for end (point-in-time)
+                self.query_params["realtime_end"] = realtime_start
+
+        # Skip realtime params for series_vintage_dates to avoid API errors
+        if self.name == "series_vintage_dates":
+            self.query_params.pop("realtime_start", None)
+            self.query_params.pop("realtime_end", None)
 
     def _paginate_records(self, context: Context | None) -> t.Iterable[dict]:
         """Shared pagination logic for FRED streams that use offset/limit."""
@@ -587,52 +541,45 @@ class PointInTimePartitionStream(FREDStream):
 
     @property
     def partitions(self):
-        """Return partitions based on point-in-time mode or regular resource IDs."""
-        if self.config.get("point_in_time_mode", False):
-            logging.info(
-                f"Stream {self.name}: Point-in-time mode enabled - creating vintage date partitions"
-            )
-            # Use revision dates for partitions
-            revision_cache_method = getattr(
-                self._tap, f"get_cached_{self._resource_type}_revision_dates"
-            )
-            revision_data = revision_cache_method()
-            partitions = []
+        """Return partitions based on resource IDs and vintage dates (if point-in-time mode)."""
+        cache_method = getattr(self._tap, f"get_cached_{self._resource_type}_ids")
+        resource_ids = cache_method()
+        if isinstance(resource_ids[0], dict):
+            # Extract the ID from dict format
+            resource_ids = [item[self._resource_id_key] for item in resource_ids]
 
-            for item in revision_data:
-                resource_id = item[self._resource_id_key]
-                vintage_dates_count = len(item["revision_dates"])
-                logging.info(
-                    f"Stream {self.name}: Resource {resource_id} has {vintage_dates_count} vintage dates"
-                )
-                for vintage_date in item["revision_dates"]:
-                    partitions.append(
-                        {
-                            self._resource_id_key: resource_id,
-                            "vintage_date": vintage_date,
-                        }
-                    )
-
-            total_partitions = len(partitions)
-            logging.info(
-                f"Stream {self.name}: Created {total_partitions} point-in-time partitions total"
-            )
-            return partitions
-        else:
-            # Use regular resource-based partitions
-            cache_method = getattr(self._tap, f"get_cached_{self._resource_type}_ids")
-            resource_ids = cache_method()
-            if isinstance(resource_ids[0], dict):
-                # Extract the ID from dict format
-                resource_ids = [item[self._resource_id_key] for item in resource_ids]
+        # Check if point-in-time mode is enabled
+        point_in_time_mode = self.config.get("point_in_time_mode", False)
+        if not point_in_time_mode:
+            # Standard resource-based partitions
             return [
                 {self._resource_id_key: resource_id} for resource_id in resource_ids
             ]
 
+        # Point-in-time mode: create partitions for each (resource_id, vintage_date)
+        partitions = []
+        for resource_id in resource_ids:
+            vintage_dates = self._get_vintage_dates_for_resource(resource_id)
+            for vintage_date in vintage_dates:
+                partitions.append(
+                    {self._resource_id_key: resource_id, "vintage_date": vintage_date}
+                )
+        return partitions
+
+    def _get_vintage_dates_for_resource(self, resource_id: str) -> list[str]:
+        """Get vintage dates for a specific resource ID using proper API-based caching."""
+        # Use the tap's consistent caching pattern for vintage dates
+        cached_vintage_dates = self._tap.get_cached_vintage_dates()
+
+        # Extract vintage dates from cached data
+        vintage_dates = [item["vintage_date"] for item in cached_vintage_dates]
+
+        return sorted(vintage_dates)
+
     def _get_resource_records(
         self, resource_id: str, context: Context | None
     ) -> t.Iterable[dict]:
-        """Retrieve records for a specific resource ID, using vintage dates in point-in-time mode."""
+        """Retrieve records for a specific resource ID."""
         url = self.get_url()
         params = self.query_params.copy()
         params.update(
@@ -642,8 +589,15 @@ class PointInTimePartitionStream(FREDStream):
             }
         )
 
-        # Point-in-time mode and regular ALFRED mode handled by _add_alfred_params
-        self._add_alfred_params(params, context)
+        # Handle point-in-time mode with vintage-specific queries
+        if context and "vintage_date" in context:
+            vintage_date = context["vintage_date"]
+            # Set both realtime_start and realtime_end to the specific vintage date
+            params["realtime_start"] = vintage_date
+            params["realtime_end"] = vintage_date
+            self.logger.info(
+                f"Point-in-time query for {resource_id} using vintage date {vintage_date}"
+            )
 
         response_data = self._fetch_with_retry(url, params)
         records_key = self._get_records_key()
@@ -651,6 +605,9 @@ class PointInTimePartitionStream(FREDStream):
 
         for record in records:
             record[self._resource_id_key] = resource_id
+            # Add vintage_date to record for tracking
+            if context and "vintage_date" in context:
+                record["vintage_date"] = context["vintage_date"]
             record = self.post_process(record, context)
             yield record
 
@@ -659,25 +616,8 @@ class PointInTimePartitionStream(FREDStream):
         if context is None or self._resource_id_key not in context:
             # Fall back to base class behavior for non-partition usage
             yield from super().get_records(context)
-            return
-
-        if (
-            self.replication_key
-            and self.replication_method == "INCREMENTAL"
-            and context.get("vintage_date")
-        ):
-            starting_replication_key = self.get_starting_replication_key_value(context)
-            vintage_date = context["vintage_date"]
-
-            # In point-in-time mode, if the vintage_date <= starting_replication_key,
-            # this partition was already processed (realtime_start = vintage_date)
-            if starting_replication_key and vintage_date <= starting_replication_key:
-                logging.info(
-                    f"Stream {self.name}: Skipping completed partition "
-                    f"{context[self._resource_id_key]}@{vintage_date} "
-                    f"(bookmark: {starting_replication_key})"
-                )
-                return
-
-        # Use partition-specific logic
-        yield from self._get_resource_records(context[self._resource_id_key], context)
+        else:
+            # Use partition-specific logic
+            yield from self._get_resource_records(
+                context[self._resource_id_key], context
+            )

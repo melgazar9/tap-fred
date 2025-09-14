@@ -60,6 +60,7 @@ EXPECTED RESULTS:
 - API calls: ~100-200 total (distributed across time with throttling)
 """
 
+import argparse
 import json
 import os
 import tempfile
@@ -810,8 +811,6 @@ class FREDTestSuite:
 
 def main():
     """Main test execution."""
-    import argparse
-
     parser = argparse.ArgumentParser(description="Comprehensive tap-fred test suite")
     parser.add_argument(
         "--dry-run",

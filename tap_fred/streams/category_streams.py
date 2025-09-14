@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import typing as t
+from collections import deque
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 from tap_fred.client import FREDStream, CategoryBasedFREDStream
@@ -48,8 +49,6 @@ class CategoryStream(FREDStream):
 
         if category_ids == ["*"]:
             # For wildcard, use tree traversal via /category/children to discover all categories
-            from collections import deque
-
             discovered_ids = set()
             queue = deque([0])  # Start with root category
             processed = set()
@@ -131,9 +130,8 @@ class CategoryChildrenStream(CategoryBasedFREDStream):
         """Add parent_id from partition context to create proper parent-child relationships."""
         # Get the parent category ID from the partition context
         if context and "category_id" in context:
-            parent_id = context["category_id"]
             # The returned children have their own IDs, but we need to track the parent relationship
-            row["parent_id"] = parent_id
+            row["parent_id"] = context["category_id"]
 
         return super().post_process(row, context)
 

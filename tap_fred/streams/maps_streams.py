@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import typing as t
+import jsonpath_ng
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
@@ -84,8 +85,6 @@ class GeoFREDRegionalDataStream(FREDStream):
         response_data = self._make_request(url, params)
 
         # Extract records using JSONPath
-        import jsonpath_ng
-
         jsonpath_expr = jsonpath_ng.parse(self.records_jsonpath)
         matches = [match.value for match in jsonpath_expr.find(response_data)]
 
@@ -171,8 +170,6 @@ class GeoFREDSeriesDataStream(FREDStream):
         meta = response_data.get("meta", {})
 
         # Extract records using JSONPath
-        import jsonpath_ng
-
         jsonpath_expr = jsonpath_ng.parse(self.records_jsonpath)
         matches = [match.value for match in jsonpath_expr.find(response_data)]
 

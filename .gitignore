@@ -2,7 +2,7 @@
 
 **/.secrets/*
 
-.claude/*
+#.claude/*
 plugins/*
 .idea/*
 

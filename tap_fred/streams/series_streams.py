@@ -60,7 +60,6 @@ class SeriesStream(SeriesBasedFREDStream):
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params, context)
 
         response_data = self._fetch_with_retry(url, params)
         series_list = response_data.get("seriess", [])
@@ -96,7 +95,7 @@ class SeriesPartitionStream(SeriesBasedFREDStream):
             }
         )
 
-        self._add_alfred_params(params, context)
+        # Skip realtime parameters to avoid 400 errors - let FRED use defaults
 
         response_data = self._fetch_with_retry(url, params)
         records = response_data.get("observations", [])
@@ -195,7 +194,6 @@ class SeriesCategoriesStream(SeriesBasedFREDStream):
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params, context)
 
         response_data = self._fetch_with_retry(url, params)
         categories = response_data.get("categories", [])
@@ -235,7 +233,6 @@ class SeriesReleaseStream(SeriesBasedFREDStream):
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params, context)
 
         response_data = self._fetch_with_retry(url, params)
         releases = response_data.get("releases", [])
@@ -419,13 +416,18 @@ class SeriesTagsStream(SeriesBasedFREDStream):
     def _get_series_records(
         self, series_id: str, context: Context | None
     ) -> t.Iterable[dict]:
-        """Get tags for a specific series ID."""
+        """Get tags for a specific series ID.
+
+        Note: Tags are metadata that don't have vintage dates, so we skip
+        ALFRED parameters to avoid server timeouts.
+        """
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params, context)
 
-        response_data = self._fetch_with_retry(url, params)
+        # Skip ALFRED params for metadata endpoints - use direct _make_request
+        # instead of _fetch_with_retry to avoid automatic ALFRED parameter addition
+        response_data = self._make_request(url, params)
         tags = response_data.get("tags", [])
 
         for tag in tags:
@@ -475,7 +477,7 @@ class SeriesVintageDatesStream(SeriesBasedFREDStream):
     name = "series_vintage_dates"
     path = "/series/vintagedates"
     primary_keys: t.ClassVar[list[str]] = ["date"]
-    replication_key = None
+    replication_key = "date"
     records_jsonpath = "$.vintage_dates[*]"
     _add_surrogate_key = False
 
@@ -493,7 +495,9 @@ class SeriesVintageDatesStream(SeriesBasedFREDStream):
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
-        self._add_alfred_params(params, context)
+
+        # Skip realtime parameters - let FRED use defaults for complete vintage data
+        # API has issues with realtime parameters on vintagedates endpoint
 
         response_data = self._fetch_with_retry(url, params)
         vintage_dates = response_data.get("vintage_dates", [])
