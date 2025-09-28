@@ -43,6 +43,7 @@ class GeoFREDRegionalDataStream(FREDStream):
             description="Seasonality (SA, NSA, SSA, SAAR, NSAAR)",
         ),
         th.Property("units", th.StringType, description="Data units"),
+        th.Property("frequency", th.StringType, description="Data frequency"),
     ).to_dict()
 
     @property
@@ -55,6 +56,7 @@ class GeoFREDRegionalDataStream(FREDStream):
         """Generate partitions from geofred_regional_params configuration.
 
         Each parameter set in the array becomes a partition for parallel processing.
+        Supports wildcard "*" for comprehensive discovery.
         """
         regional_params = self.config.get("geofred_regional_params")
 
@@ -69,7 +71,92 @@ class GeoFREDRegionalDataStream(FREDStream):
                 "geofred_regional_params must be an array of parameter sets"
             )
 
-        return regional_params
+        # Expand wildcard parameters
+        expanded_partitions = []
+        for param_set in regional_params:
+            expanded_partitions.extend(self._expand_wildcard_params(param_set))
+
+        return expanded_partitions
+
+    def _expand_wildcard_params(self, param_set):
+        """Expand wildcard parameters to all possible combinations."""
+        series_groups = self._expand_series_groups(param_set.get("series_group"))
+        region_types = self._expand_region_types(param_set.get("region_type"))
+        seasons = self._expand_seasons(param_set.get("season"))
+
+        # Validate required parameters that have no wildcard support
+        if not param_set.get("date"):
+            raise ValueError(
+                "GeoFRED API requires 'date' parameter in YYYY-MM-DD format. "
+                "Add 'date' to each geofred_regional_params entry."
+            )
+
+        if not param_set.get("units"):
+            raise ValueError(
+                "GeoFRED API requires 'units' parameter (e.g., 'Dollars', 'Percent'). "
+                "Add 'units' to each geofred_regional_params entry."
+            )
+
+        # Generate all combinations including required parameters
+        partitions = []
+        for series_group in series_groups:
+            for region_type in region_types:
+                for season in seasons:
+                    partitions.append(
+                        {
+                            "series_group": series_group,
+                            "region_type": region_type,
+                            "season": season,
+                            "date": param_set["date"],
+                            "units": param_set["units"],
+                            # Optional parameters if provided
+                            "frequency": param_set.get(
+                                "frequency", "a"
+                            ),  # Default to annual
+                        }
+                    )
+
+        return partitions
+
+    @staticmethod
+    def _expand_series_groups(series_group):
+        """Expand series_group wildcard to available options."""
+        if series_group != "*":
+            return [series_group]
+
+        # Wildcard not supported for GeoFRED - requires explicit configuration
+        raise ValueError(
+            "GeoFRED wildcard '*' for series_group is not supported. "
+            "GeoFRED API requires explicit series_group values. "
+            "Configure specific series_group IDs (e.g., '882', '883') instead of '*'."
+        )
+
+    @staticmethod
+    def _expand_region_types(region_type):
+        """Expand region_type wildcard to all supported types."""
+        if region_type != "*":
+            return [region_type]
+
+        # Expand wildcard to all documented GeoFRED region types
+        return [
+            "bea",
+            "msa",
+            "frb",
+            "necta",
+            "state",
+            "country",
+            "county",
+            "censusregion",
+        ]
+
+    @staticmethod
+    def _expand_seasons(season):
+        """Expand season wildcard to all supported seasons."""
+        if season != "*":
+            return [season]
+
+        # Expand wildcard to all documented GeoFRED season values
+        return ["SA", "NSA", "SSA", "SAAR", "NSAAR"]
 
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
         """Retrieve records using partition-based parameter sets."""
@@ -95,9 +182,8 @@ class GeoFREDRegionalDataStream(FREDStream):
                     "series_group": context.get("series_group"),
                     "region_type": context.get("region_type"),
                     "season": context.get("season"),
-                    "units": response_data.get("meta", {}).get(
-                        "units", context.get("units", "")
-                    ),
+                    "units": context.get("units"),
+                    "frequency": context.get("frequency"),
                 }
             )
 
@@ -140,6 +226,7 @@ class GeoFREDSeriesDataStream(FREDStream):
         """Generate partitions from geofred_series_ids configuration.
 
         Each series ID becomes a partition for parallel processing.
+        Supports wildcard "*" for comprehensive discovery.
         """
         geofred_series_ids = self.config.get("geofred_series_ids")
 
@@ -152,7 +239,52 @@ class GeoFREDSeriesDataStream(FREDStream):
         if not isinstance(geofred_series_ids, list):
             raise ValueError("geofred_series_ids must be an array of series IDs")
 
+        # Handle wildcard discovery
+        if geofred_series_ids == ["*"]:
+            discovered_series_ids = self._discover_geofred_series_ids()
+            return [{"series_id": series_id} for series_id in discovered_series_ids]
+
         return [{"series_id": series_id} for series_id in geofred_series_ids]
+
+    def _discover_geofred_series_ids(self):
+        """Discover all available GeoFRED series IDs."""
+        try:
+            # Use main FRED API to discover all series tagged with 'geography' or 'regional'
+            url = f"{self.config['api_url']}/series/search"
+            params = self.query_params.copy()
+            params.update(
+                {
+                    "search_text": "geography regional",
+                    "limit": 100000,  # Maximum to get comprehensive list
+                    "order_by": "series_id",
+                    "sort_order": "asc",
+                }
+            )
+
+            response_data = self._make_request(url, params)
+            series_list = response_data.get("seriess", [])
+
+            # Extract series IDs from search results
+            discovered_series_ids = [
+                series.get("id") for series in series_list if series.get("id")
+            ]
+
+            if discovered_series_ids:
+                self.logger.info(
+                    f"Discovered {len(discovered_series_ids)} GeoFRED series IDs"
+                )
+                return discovered_series_ids
+            else:
+                raise ValueError(
+                    "No GeoFRED series IDs discovered via search. "
+                    "Configure explicit geofred_series_ids instead of using wildcard '*'."
+                )
+
+        except Exception as e:
+            raise ValueError(
+                f"Failed to discover GeoFRED series IDs: {e}. "
+                "Configure explicit geofred_series_ids instead of using wildcard '*'."
+            )
 
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
         """Retrieve records for a specific series ID from partition context."""

@@ -169,8 +169,8 @@ plugins:
       min_throttle_seconds: 1.0
 
       series_ids: ["GDP", "UNRATE"]
-      category_ids: ["18"]
-      release_ids: ["53"]
+      category_ids: ["*"]
+      release_ids: ["*"]
       source_ids: ["1"]
       tag_names: ["gdp"]
 
@@ -189,21 +189,24 @@ plugins:
       # GeoFRED Maps Configuration
       geofred_regional_params:
         - series_group: "882"
-          region_type: "state"
-          season: "SA"
+          region_type: "*"
+          season: "*"
+          date: "2013-01-01"
+          units: "Dollars"
+          frequency: "a"
       geofred_series_ids: ["CAHOWN", "TXHOWN"]
 
-      # Optional: Search Stream Parameters (only needed if using search streams)
-      # series_search_params:
-      #   query_params:
-      #     search_text: "GDP"
-      # series_search_tags_params:
-      #   query_params:
-      #     series_search_text: "GDP"
-      # series_search_related_tags_params:
-      #   query_params:
-      #     series_search_text: "GDP"
-      #     tag_names: ["gdp", "usa"]
+      # Search Stream Parameters (enabled for testing)
+      series_search_params:
+        query_params:
+          search_text: "GDP"
+      series_search_tags_params:
+        query_params:
+          series_search_text: "GDP"
+      series_search_related_tags_params:
+        query_params:
+          series_search_text: "GDP"
+          tag_names: ["gdp", "usa"]
 
       default_params:
         query_params:
