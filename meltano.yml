@@ -192,9 +192,19 @@ plugins:
           region_type: "state"
           season: "SA"
       geofred_series_ids: ["CAHOWN", "TXHOWN"]
-      
-      # Mode 5: Single Series - Minimal configuration with single IDs
-      
+
+      # Optional: Search Stream Parameters (only needed if using search streams)
+      # series_search_params:
+      #   query_params:
+      #     search_text: "GDP"
+      # series_search_tags_params:
+      #   query_params:
+      #     series_search_text: "GDP"
+      # series_search_related_tags_params:
+      #   query_params:
+      #     series_search_text: "GDP"
+      #     tag_names: ["gdp", "usa"]
+
       default_params:
         query_params:
           limit: 1000

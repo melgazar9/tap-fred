@@ -279,12 +279,8 @@ class SeriesSearchStream(FREDStream):
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
-        # Add search-specific query parameters
-        self.query_params.update(
-            {
-                "search_text": "",  # Can be configured
-            }
-        )
+        # search_text is optional for /series/search endpoint
+        # Handled automatically via series_search_params.query_params.search_text
 
     def _get_records_key(self) -> str:
         return "seriess"
@@ -314,12 +310,8 @@ class SeriesSearchTagsStream(FREDStream):
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
-        # Add search-specific query parameters
-        self.query_params.update(
-            {
-                "series_search_text": "",  # Can be configured
-            }
-        )
+        # series_search_text is required for /series/search/tags endpoint
+        # Handled automatically via series_search_tags_params.query_params.series_search_text
 
     def _get_records_key(self) -> str:
         return "tags"
@@ -353,37 +345,17 @@ class SeriesSearchRelatedTagsStream(FREDStream):
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
+        # series_search_text and tag_names are required for /series/search/related_tags endpoint
+        # Need custom handling for tag_names array-to-string conversion
 
-        # Get required parameters from config - NO DEFAULTS!
-        search_text = self.config.get("search_text")
-        tag_names = self.config.get("tag_names")
+        # Get tag_names from stream-specific config and convert to semicolon-delimited string
+        stream_params = self.config.get("series_search_related_tags_params", {})
+        query_params = stream_params.get("query_params", {})
+        tag_names = query_params.get("tag_names")
 
-        if not search_text:
-            raise ValueError(
-                "SeriesSearchRelatedTagsStream requires search_text to be configured. "
-                "No defaults are provided - search text must be explicitly configured."
-            )
-
-        if not tag_names:
-            raise ValueError(
-                "SeriesSearchRelatedTagsStream requires tag_names to be configured. "
-                "No defaults are provided - tag names must be explicitly configured."
-            )
-
-        # Convert tag_names to string format
-        if isinstance(tag_names, list):
-            tag_names_str = ";".join(tag_names)
-        elif isinstance(tag_names, str):
-            tag_names_str = tag_names
-        else:
-            raise ValueError("tag_names must be a list or string")
-
-        self.query_params.update(
-            {
-                "series_search_text": search_text,
-                "tag_names": tag_names_str,
-            }
-        )
+        if tag_names and isinstance(tag_names, list):
+            # Convert array to semicolon-delimited string as required by FRED API
+            self.query_params["tag_names"] = ";".join(tag_names)
 
     def _get_records_key(self) -> str:
         return "tags"

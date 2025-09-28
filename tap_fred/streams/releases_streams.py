@@ -311,10 +311,10 @@ class ReleaseTablesStream(ReleaseBasedFREDStream):
     path = "/release/tables"
     primary_keys: t.ClassVar[list[str]] = ["element_id"]
     replication_key = None
-    records_jsonpath = "$.elements[*]"
+    records_jsonpath = "$.elements.*"
 
     schema = th.PropertiesList(
-        th.Property("element_id", th.StringType, description="Element ID"),
+        th.Property("element_id", th.IntegerType, description="Element ID"),
         th.Property("release_id", th.IntegerType, description="Release ID"),
         th.Property("series_id", th.StringType, description="Series ID"),
         th.Property("parent_id", th.StringType, description="Parent element ID"),
