@@ -136,6 +136,22 @@ class TapFRED(Tap):
             default=True,
             description="Enable geographic/regional data streams (default: true)",
         ),
+        th.Property(
+            "point_in_time_mode",
+            th.BooleanType,
+            default=False,
+            description="Enable point-in-time vintage date partitioning for backtesting",
+        ),
+        th.Property(
+            "point_in_time_start",
+            th.DateTimeType,
+            description="Filter vintage dates from this date (YYYY-MM-DD)",
+        ),
+        th.Property(
+            "point_in_time_end",
+            th.DateTimeType,
+            description="Filter vintage dates up to this date (YYYY-MM-DD)",
+        ),
     ).to_dict()
 
     # Category caching
@@ -271,7 +287,22 @@ class TapFRED(Tap):
                                     )
                                 ]
                             elif data_key == "date":  # For vintage dates using "date"
-                                cached_data = [{id_key: item["date"]} for item in data]
+                                # Preserve parent resource ID for per-resource vintage date filtering
+                                # Extract parent resource ID key from discovery stream (generic pattern)
+                                parent_id_key = getattr(discovery_stream, '_resource_id_key', None)
+                                if not parent_id_key:
+                                    raise ValueError(
+                                        f"Discovery stream for {resource_type} must define _resource_id_key "
+                                        f"for vintage date caching"
+                                    )
+
+                                cached_data = [
+                                    {
+                                        id_key: item["date"],
+                                        "resource_id": item[parent_id_key]  # Generic "resource_id" field
+                                    }
+                                    for item in data
+                                ]
                             else:  # For tags using "name"
                                 cached_data = [{id_key: item["name"]} for item in data]
                     else:

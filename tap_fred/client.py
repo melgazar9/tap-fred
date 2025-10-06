@@ -467,6 +467,8 @@ class TreeTraversalFREDStream(FREDStream):
 class SeriesBasedFREDStream(FREDStream):
     """Base class for FRED streams that operate on series data."""
 
+    _resource_id_key = "series_id"  # Generic resource ID key for series-based streams
+
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
         """Process records for each configured series ID."""
         series_ids = self._get_series_ids()
@@ -489,6 +491,8 @@ class SeriesBasedFREDStream(FREDStream):
 class ReleaseBasedFREDStream(FREDStream):
     """Base class for all release-related streams."""
 
+    _resource_id_key = "release_id"  # Generic resource ID key for release-based streams
+
     @property
     def partitions(self):
         """Generate partitions from cached release IDs."""
@@ -498,6 +502,8 @@ class ReleaseBasedFREDStream(FREDStream):
 
 class CategoryBasedFREDStream(FREDStream):
     """Base class for all category-related streams."""
+
+    _resource_id_key = "category_id"  # Generic resource ID key for category-based streams
 
     @property
     def partitions(self):
@@ -509,6 +515,8 @@ class CategoryBasedFREDStream(FREDStream):
 class SourceBasedFREDStream(FREDStream):
     """Base class for all source-related streams."""
 
+    _resource_id_key = "source_id"  # Generic resource ID key for source-based streams
+
     @property
     def partitions(self):
         """Generate partitions from cached source IDs."""
@@ -518,6 +526,8 @@ class SourceBasedFREDStream(FREDStream):
 
 class TagBasedFREDStream(FREDStream):
     """Base class for all tag-related streams."""
+
+    _resource_id_key = "tag_name"  # Generic resource ID key for tag-based streams
 
     @property
     def partitions(self):
@@ -560,19 +570,49 @@ class PointInTimePartitionStream(FREDStream):
         partitions = []
         for resource_id in resource_ids:
             vintage_dates = self._get_vintage_dates_for_resource(resource_id)
-            for vintage_date in vintage_dates:
-                partitions.append(
-                    {self._resource_id_key: resource_id, "vintage_date": vintage_date}
+
+            if not vintage_dates:
+                # No vintage dates found - series never revised or all filtered out
+                # Create standard partition to ensure series is still extracted
+                self.logger.warning(
+                    f"No vintage dates for {resource_id} in point-in-time mode. "
+                    f"Extracting with current data."
                 )
+                partitions.append({self._resource_id_key: resource_id})
+            else:
+                # Create partition for each vintage date
+                for vintage_date in vintage_dates:
+                    partitions.append(
+                        {self._resource_id_key: resource_id, "vintage_date": vintage_date}
+                    )
         return partitions
 
     def _get_vintage_dates_for_resource(self, resource_id: str) -> list[str]:
-        """Get vintage dates for a specific resource ID using proper API-based caching."""
+        """Get vintage dates for a specific resource ID using proper API-based caching.
+
+        IMPORTANT: This uses generic "resource_id" field, not hardcoded "series_id".
+        Works for ANY resource type (series, categories, releases, etc.) that has vintage dates.
+        """
         # Use the tap's consistent caching pattern for vintage dates
         cached_vintage_dates = self._tap.get_cached_vintage_dates()
 
-        # Extract vintage dates from cached data
-        vintage_dates = [item["vintage_date"] for item in cached_vintage_dates]
+        # Filter vintage dates for THIS specific resource only (avoid cross-product)
+        # Uses generic "resource_id" field from cache, not hardcoded "series_id"
+        vintage_dates = [
+            item["vintage_date"]
+            for item in cached_vintage_dates
+            if item.get("resource_id") == resource_id
+        ]
+
+        # Apply point_in_time_start and point_in_time_end filtering
+        point_in_time_start = self.config.get("point_in_time_start")
+        point_in_time_end = self.config.get("point_in_time_end")
+
+        if point_in_time_start:
+            vintage_dates = [d for d in vintage_dates if d >= point_in_time_start]
+
+        if point_in_time_end:
+            vintage_dates = [d for d in vintage_dates if d <= point_in_time_end]
 
         return sorted(vintage_dates)
 
