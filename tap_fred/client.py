@@ -134,7 +134,7 @@ class FREDStream(RESTStream, ABC):
         ),
     )
     def _make_request(self, url: str, params: dict) -> dict:
-        """Single centralized method for all API requests - DRY principle."""
+        """Single centralized method for all API requests."""
         log_url = self.redact_api_key(url)
         log_params = {
             k: ("<REDACTED>" if k == "api_key" else v) for k, v in params.items()
@@ -215,26 +215,61 @@ class FREDStream(RESTStream, ABC):
     def get_url(self, context: Context | None = None) -> str:
         return f"{self.url_base}{self.path}"
 
+    def _safe_partition_extraction(
+        self, generator: t.Iterable[dict], resource_id: str, resource_id_key: str
+    ) -> t.Iterable[dict]:
+        """Safely extract records from a partition with graceful error handling.
+
+        Wraps partition extraction to log errors and continue instead of
+        failing the entire sync when a single partition has issues.
+        """
+        try:
+            yield from generator
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if hasattr(e, 'response') and e.response else "unknown"
+            self.logger.error(
+                f"Failed to extract {resource_id_key}={resource_id} after retries "
+                f"(HTTP {status_code}). Skipping this partition and continuing with others."
+            )
+            self.logger.debug(f"Error details for {resource_id}: {str(e)}")
+        except Exception as e:
+            self.logger.error(
+                f"Unexpected error extracting {resource_id_key}={resource_id}: {type(e).__name__}. "
+                f"Skipping this partition and continuing with others."
+            )
+            self.logger.debug(f"Error details for {resource_id}: {str(e)}")
+
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
         """Retrieve records from the API - uses pagination if _paginate flag is True."""
-        if self._paginate:
-            yield from self._paginate_records(context)
+        # Check if this is a partition-based stream
+        resource_id_key = getattr(self, '_resource_id_key', None)
+        is_partition = context and resource_id_key and resource_id_key in context
+
+        def extract_records():
+            if self._paginate:
+                yield from self._paginate_records(context)
+            else:
+                url = self.get_url()
+                params = self.query_params.copy()
+                if context:
+                    params.update(context)
+
+                response_data = self._make_request(url, params)
+                jsonpath_expr = jsonpath_ng.parse(self.records_jsonpath)
+                matches = [match.value for match in jsonpath_expr.find(response_data)]
+
+                for record in matches:
+                    record = self.post_process(record, context)
+                    yield record
+
+        # Wrap in safe extraction if partition, otherwise extract directly
+        if is_partition:
+            resource_id = context.get(resource_id_key)
+            yield from self._safe_partition_extraction(
+                extract_records(), resource_id, resource_id_key
+            )
         else:
-            # Single API call for simple streams
-            url = self.get_url()
-            params = self.query_params.copy()
-            if context:
-                params.update(context)
-
-            response_data = self._make_request(url, params)
-
-            # Extract records using JSONPath
-            jsonpath_expr = jsonpath_ng.parse(self.records_jsonpath)
-            matches = [match.value for match in jsonpath_expr.find(response_data)]
-
-            for record in matches:
-                record = self.post_process(record, context)
-                yield record
+            yield from extract_records()
 
     def _fetch_and_process_records(
         self, url: str, params: dict, context: Context | None
@@ -539,7 +574,7 @@ class TagBasedFREDStream(FREDStream):
 class PointInTimePartitionStream(FREDStream):
     """Base class for streams with point-in-time vintage date partitioning.
 
-    This DRY base class handles the common pattern of:
+    Handles the common pattern of:
     1. Getting resource IDs (series_ids, category_ids, etc.)
     2. Getting revision dates for each resource ID
     3. Creating partitions for each (resource_id, vintage_date) combination
@@ -654,10 +689,11 @@ class PointInTimePartitionStream(FREDStream):
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
         """Retrieve records for a specific resource ID from context (partition support)."""
         if context is None or self._resource_id_key not in context:
-            # Fall back to base class behavior for non-partition usage
             yield from super().get_records(context)
         else:
-            # Use partition-specific logic
-            yield from self._get_resource_records(
-                context[self._resource_id_key], context
+            resource_id = context[self._resource_id_key]
+            yield from self._safe_partition_extraction(
+                self._get_resource_records(resource_id, context),
+                resource_id,
+                self._resource_id_key
             )
