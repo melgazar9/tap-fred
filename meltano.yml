@@ -169,28 +169,26 @@ plugins:
       min_throttle_seconds: 1.0
 
       series_ids: ["GDP", "UNRATE"]
-      category_ids: ["*"]
-      release_ids: ["*"]
+      category_ids: ["18", "32992"]
+      release_ids: ["53", "151"]
       source_ids: ["1"]
       tag_names: ["gdp"]
 
-      # Incremental Testing: FRED mode for proper bookmark advancement
+      # FRED/ALFRED mode configuration
       data_mode: "FRED"
-      # realtime_start: "2019-01-01"
-      # realtime_end: "2021-01-01"
+      # realtime_start: "2020-01-01"    # Uncomment for ALFRED mode
+      # realtime_end: "2020-12-31"      # Uncomment for ALFRED mode
 
-      # Point-in-Time Mode disabled for incremental testing
+      # Point-in-Time mode (uncomment for backtesting)
       point_in_time_mode: false
       # point_in_time_start: "2020-01-01"
-      # point_in_time_end: "2020-12-31"
-      # point_in_time_start: "2020-01-01"  # Filter vintage dates from this date
-      # point_in_time_end: "2020-12-31"    # Filter vintage dates up to this date
-      
+      # point_in_time_end: "2020-06-30"
+
       # GeoFRED Maps Configuration
       geofred_regional_params:
         - series_group: "882"
-          region_type: "*"
-          season: "*"
+          region_type: "state"
+          season: "NSA"
           date: "2013-01-01"
           units: "Dollars"
           frequency: "a"

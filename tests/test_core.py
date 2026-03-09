@@ -1,8 +1,11 @@
 """Tests standard tap features using the built-in SDK tests library."""
 
 import datetime
+import os
 import unittest
 
+import pytest
+from singer_sdk import typing as th
 from singer_sdk.testing import get_tap_test_class
 
 from tap_fred.tap import TapFRED
@@ -19,11 +22,19 @@ SAMPLE_CONFIG = {
 }
 
 
-# Run standard built-in tap tests from the SDK:
-TestTapFRED = get_tap_test_class(
-    tap_class=TapFRED,
-    config=SAMPLE_CONFIG,
-)
+# SDK integration tests require a real API key (sync_all() makes live HTTP requests).
+# All mocked/unit tests below always run regardless of API key availability.
+if os.environ.get("FRED_API_KEY"):
+    _sdk_config = {**SAMPLE_CONFIG, "api_key": os.environ["FRED_API_KEY"]}
+    TestTapFRED = get_tap_test_class(
+        tap_class=TapFRED,
+        config=_sdk_config,
+    )
+else:
+
+    @pytest.mark.skip(reason="FRED_API_KEY not set - SDK integration tests require a real API key")
+    class TestTapFRED:
+        pass
 
 
 class TestConfigAccess(unittest.TestCase):
@@ -36,52 +47,47 @@ class TestConfigAccess(unittest.TestCase):
     def test_point_in_time_mode_config_access(self):
         """Test that point_in_time_mode is accessed correctly via self.config."""
 
-        # Create a mock stream that inherits from FREDStream
         class MockFREDStream(FREDStream):
             name = "test_stream"
             path = "/test"
             records_jsonpath = "$.data[*]"
 
+            schema = th.PropertiesList(
+                th.Property("id", th.StringType),
+            ).to_dict()
+
             def _get_records_key(self):
                 return "data"
 
-        # Create stream instance
         stream = MockFREDStream(self.tap)
 
-        # Test that config access works correctly
         self.assertTrue(stream.config.get("point_in_time_mode", False))
         self.assertEqual(stream.config.get("data_mode"), "ALFRED")
         self.assertEqual(stream.config.get("realtime_start"), "2020-01-01")
 
-    def test_alfred_params_added_correctly(self):
-        """Test that ALFRED parameters are added correctly in different scenarios."""
+    def test_realtime_params_added_correctly(self):
+        """Test that realtime parameters are added correctly in ALFRED mode."""
 
         class MockFREDStream(FREDStream):
             name = "test_stream"
             path = "/test"
             records_jsonpath = "$.data[*]"
 
+            schema = th.PropertiesList(
+                th.Property("id", th.StringType),
+            ).to_dict()
+
             def _get_records_key(self):
                 return "data"
 
         stream = MockFREDStream(self.tap)
 
-        # Test regular ALFRED mode (no context)
-        params = {}
-        stream._add_alfred_params(params, None)
-        self.assertEqual(params.get("realtime_start"), "2020-01-01")
-        self.assertEqual(params.get("realtime_end"), "2020-01-01")
-
-        # Test point-in-time mode with vintage_date in context
-        params = {}
-        context = {"vintage_date": "2019-06-15"}
-        stream._add_alfred_params(params, context)
-        self.assertEqual(params.get("realtime_start"), "2019-06-15")
-        self.assertEqual(params.get("realtime_end"), "2019-06-15")
+        # ALFRED mode should add realtime params during __init__
+        self.assertEqual(stream.query_params.get("realtime_start"), "2020-01-01")
+        self.assertEqual(stream.query_params.get("realtime_end"), "2020-01-01")
 
     def test_parameter_documentation_clarity(self):
         """Test that parameter usage is clear and documented."""
-        # Test that both parameter sets are understood correctly
         config_with_both = {
             **SAMPLE_CONFIG,
             "point_in_time_start": "2019-01-01",
@@ -90,10 +96,7 @@ class TestConfigAccess(unittest.TestCase):
 
         tap = TapFRED(config=config_with_both)
 
-        # realtime_start/end should be used for global ALFRED mode
         self.assertEqual(tap.config.get("realtime_start"), "2020-01-01")
         self.assertEqual(tap.config.get("realtime_end"), "2020-01-01")
-
-        # point_in_time_start/end should be used for filtering vintage dates
         self.assertEqual(tap.config.get("point_in_time_start"), "2019-01-01")
         self.assertEqual(tap.config.get("point_in_time_end"), "2021-01-01")

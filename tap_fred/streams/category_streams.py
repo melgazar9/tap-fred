@@ -7,6 +7,7 @@ from collections import deque
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 from tap_fred.client import FREDStream, CategoryBasedFREDStream
+from tap_fred.helpers import join_tag_names
 
 
 class CategoryStream(FREDStream):
@@ -264,25 +265,13 @@ class CategoryRelatedTagsStream(CategoryBasedFREDStream):
     def __init__(self, tap) -> None:
         super().__init__(tap)
 
-        # Get tag_names from config - required parameter for this endpoint
         tag_names = self.config.get("tag_names")
         if not tag_names:
             raise ValueError(
-                "CategoryRelatedTagsStream requires tag_names to be configured"
+                "CategoryRelatedTagsStream requires tag_names to be configured."
             )
 
-        if isinstance(tag_names, list):
-            tag_names_str = ";".join(tag_names)
-        elif isinstance(tag_names, str):
-            tag_names_str = tag_names
-        else:
-            raise ValueError("tag_names must be a list or string")
-
-        self.query_params.update(
-            {
-                "tag_names": tag_names_str,
-            }
-        )
+        self.query_params["tag_names"] = join_tag_names(tag_names)
 
     def _get_records_key(self) -> str:
         return "tags"

@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import typing as t
+
 from singer_sdk import typing as th
-from singer_sdk.helpers.types import Context
 
 from tap_fred.client import FREDStream, ReleaseBasedFREDStream
+from tap_fred.helpers import join_tag_names
 
 
-class ReleasesStream(ReleaseBasedFREDStream):
+class ReleasesStream(FREDStream):
     """Stream for FRED releases - /fred/releases endpoint.
 
+    List-all endpoint - returns all releases. Does NOT accept release_id filter.
     Uses pagination per FRED API documentation (limit 1-1000, default 1000).
     """
 
@@ -49,16 +51,7 @@ class ReleasesStream(ReleaseBasedFREDStream):
     def _get_records_key(self) -> str:
         return "releases"
 
-    def post_process(self, record: dict, context: Context | None = None) -> dict:
-        """Transform raw data to match expected structure."""
-        # Apply business logic BEFORE calling super()
-        if "press_release" in record and isinstance(record["press_release"], str):
-            record["press_release"] = record["press_release"].lower() == "true"
-
-        return super().post_process(record, context)
-
-
-class ReleaseStream(FREDStream):
+class ReleaseStream(ReleaseBasedFREDStream):
     """Stream for individual FRED release - /fred/release endpoint.
 
     Requires release_ids to be configured. Each release ID becomes a partition.
@@ -82,14 +75,6 @@ class ReleaseStream(FREDStream):
 
     def _get_records_key(self) -> str:
         return "releases"
-
-    def post_process(self, record: dict, context: Context | None = None) -> dict:
-        """Transform raw data to match expected structure."""
-        # Apply business logic BEFORE calling super()
-        if "press_release" in record and isinstance(record["press_release"], str):
-            record["press_release"] = record["press_release"].lower() == "true"
-
-        return super().post_process(record, context)
 
 
 class ReleaseDatesStream(FREDStream):
@@ -278,24 +263,16 @@ class ReleaseRelatedTagsStream(FREDStream):
                 "No defaults are provided - all tag names must be explicitly configured."
             )
 
-        # Resolve wildcard release_ids
+        # Resolve wildcard release_ids (cache returns list of dicts)
         if release_ids == ["*"]:
-            release_ids = self._tap.get_cached_release_ids()
+            cached = self._tap.get_cached_release_ids()
+            release_ids = [item["release_id"] for item in cached]
 
-        # Create partitions for each combination of release_id and tag_names
-        partitions = []
-        for release_id in release_ids:
-            tag_names_str = (
-                ";".join(tag_names) if isinstance(tag_names, list) else str(tag_names)
-            )
-            partitions.append(
-                {
-                    "release_id": int(release_id),
-                    "tag_names": tag_names_str,
-                }
-            )
-
-        return partitions
+        tag_names_str = join_tag_names(tag_names)
+        return [
+            {"release_id": int(release_id), "tag_names": tag_names_str}
+            for release_id in release_ids
+        ]
 
     def _get_records_key(self) -> str:
         return "tags"

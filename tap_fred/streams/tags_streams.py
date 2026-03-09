@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import typing as t
+
 from singer_sdk import typing as th
-from singer_sdk.helpers.types import Context
 
 from tap_fred.client import FREDStream
+from tap_fred.helpers import join_tag_names
 
 
 class TagsStream(FREDStream):
@@ -41,25 +42,8 @@ class TagsStream(FREDStream):
             }
         )
 
-    def post_process(self, record: dict, context: Context | None = None) -> dict:
-        """Transform raw data to match expected structure."""
-        record = super().post_process(record, context)
-
-        # Convert numeric fields
-        if "popularity" in record and record["popularity"] is not None:
-            try:
-                record["popularity"] = int(record["popularity"])
-            except (ValueError, TypeError):
-                record["popularity"] = None
-
-        if "series_count" in record and record["series_count"] is not None:
-            try:
-                record["series_count"] = int(record["series_count"])
-            except (ValueError, TypeError):
-                record["series_count"] = None
-
-        return record
-
+    def _get_records_key(self) -> str:
+        return "tags"
 
 class RelatedTagsStream(FREDStream):
     """Stream for FRED related tags - /fred/related_tags endpoint."""
@@ -86,49 +70,20 @@ class RelatedTagsStream(FREDStream):
     def __init__(self, tap) -> None:
         super().__init__(tap)
 
-        # Get tag_names from config - required parameter for this endpoint
         tag_names = self.config.get("tag_names")
-
         if not tag_names:
             raise ValueError(
-                "RelatedTagsStream requires tag_names to be configured. "
-                "No defaults are provided - all tag names must be explicitly configured."
+                "RelatedTagsStream requires tag_names to be configured."
             )
 
-        if isinstance(tag_names, list):
-            tag_names_str = ";".join(tag_names)
-        elif isinstance(tag_names, str):
-            tag_names_str = tag_names
-        else:
-            raise ValueError("tag_names must be a list or string")
+        self.query_params.update({
+            "sort_order": "asc",
+            "order_by": "name",
+            "tag_names": join_tag_names(tag_names),
+        })
 
-        # Add related tags-specific query parameters
-        self.query_params.update(
-            {
-                "sort_order": "asc",
-                "order_by": "name",
-                "tag_names": tag_names_str,
-            }
-        )
-
-    def post_process(self, record: dict, context: Context | None = None) -> dict:
-        """Transform raw data to match expected structure."""
-        record = super().post_process(record, context)
-
-        # Convert numeric fields
-        if "popularity" in record and record["popularity"] is not None:
-            try:
-                record["popularity"] = int(record["popularity"])
-            except (ValueError, TypeError):
-                record["popularity"] = None
-
-        if "series_count" in record and record["series_count"] is not None:
-            try:
-                record["series_count"] = int(record["series_count"])
-            except (ValueError, TypeError):
-                record["series_count"] = None
-
-        return record
+    def _get_records_key(self) -> str:
+        return "tags"
 
 
 class TagsSeriesStream(FREDStream):
@@ -167,14 +122,18 @@ class TagsSeriesStream(FREDStream):
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
-        # Add tags series-specific query parameters
-        self.query_params.update(
-            {
-                "sort_order": "asc",
-                "order_by": "series_id",
-                "tag_names": "",  # Can be configured
-            }
-        )
+
+        tag_names = self.config.get("tag_names")
+        if not tag_names:
+            raise ValueError(
+                "TagsSeriesStream requires tag_names to be configured."
+            )
+
+        self.query_params.update({
+            "sort_order": "asc",
+            "order_by": "series_id",
+            "tag_names": join_tag_names(tag_names),
+        })
 
     def _get_records_key(self) -> str:
         return "seriess"

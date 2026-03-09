@@ -11,6 +11,7 @@ from tap_fred.client import (
     FREDStream,
     PointInTimePartitionStream,
 )
+from tap_fred.helpers import join_tag_names
 
 
 class SeriesStream(SeriesBasedFREDStream):
@@ -68,59 +69,12 @@ class SeriesStream(SeriesBasedFREDStream):
             yield self.post_process(series, context)
 
 
-class SeriesPartitionStream(SeriesBasedFREDStream):
-    """Base stream class for FRED series partitioned streams."""
-
-    @property
-    def partitions(self):
-        """Return partitions based on series IDs."""
-        series_ids = self._tap.get_cached_series_ids()
-        return [{"series_id": series_id} for series_id in series_ids]
-
-    def _get_series_records(
-        self, series_id: str, context: Context | None
-    ) -> t.Iterable[dict]:
-        """Retrieve records for a specific series ID - override base class method."""
-        # Create partition context for this series
-        partition_context = {"series_id": series_id}
-        if context:
-            partition_context.update(context)
-
-        url = self.get_url()
-        params = self.query_params.copy()
-        params.update(
-            {
-                "series_id": series_id,
-                "sort_order": "asc",
-            }
-        )
-
-        # Skip realtime parameters to avoid 400 errors - let FRED use defaults
-
-        response_data = self._fetch_with_retry(url, params)
-        records = response_data.get("observations", [])
-        for record in records:
-            record["series_id"] = series_id
-            record = self.post_process(record, partition_context)
-            yield record
-
-    def get_records(self, context: Context | None) -> t.Iterable[dict]:
-        """Retrieve records for a specific series ID from context (partition support)."""
-        if context is None or "series_id" not in context:
-            # Fall back to base class behavior for non-partition usage
-            yield from super().get_records(context)
-            return
-
-        # Use partition-specific logic
-        yield from self._get_series_records(context["series_id"], context)
-
-
 class SeriesObservationsStream(PointInTimePartitionStream):
     """Stream for FRED series observations (economic data points)."""
 
     name = "series_observations"
     path = "/series/observations"
-    primary_keys: t.ClassVar[list[str]] = ["series_id", "date"]
+    primary_keys: t.ClassVar[list[str]] = ["series_id", "date", "realtime_start", "realtime_end"]
     _add_surrogate_key = False
 
     # Point-in-time partitioning configuration
@@ -239,9 +193,6 @@ class SeriesReleaseStream(SeriesBasedFREDStream):
 
         for release in releases:
             release["series_id"] = series_id
-            # Convert press_release to boolean
-            if "press_release" in release:
-                release["press_release"] = release["press_release"] == "true"
             yield self.post_process(release, context)
 
 
@@ -277,11 +228,6 @@ class SeriesSearchStream(FREDStream):
         th.Property("notes", th.StringType, description="Series notes"),
     ).to_dict()
 
-    def __init__(self, tap) -> None:
-        super().__init__(tap)
-        # search_text is optional for /series/search endpoint
-        # Handled automatically via series_search_params.query_params.search_text
-
     def _get_records_key(self) -> str:
         return "seriess"
 
@@ -307,11 +253,6 @@ class SeriesSearchTagsStream(FREDStream):
             "series_count", th.IntegerType, description="Number of series with this tag"
         ),
     ).to_dict()
-
-    def __init__(self, tap) -> None:
-        super().__init__(tap)
-        # series_search_text is required for /series/search/tags endpoint
-        # Handled automatically via series_search_tags_params.query_params.series_search_text
 
     def _get_records_key(self) -> str:
         return "tags"
@@ -345,17 +286,12 @@ class SeriesSearchRelatedTagsStream(FREDStream):
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
-        # series_search_text and tag_names are required for /series/search/related_tags endpoint
-        # Need custom handling for tag_names array-to-string conversion
 
-        # Get tag_names from stream-specific config and convert to semicolon-delimited string
         stream_params = self.config.get("series_search_related_tags_params", {})
-        query_params = stream_params.get("query_params", {})
-        tag_names = query_params.get("tag_names")
+        tag_names = stream_params.get("query_params", {}).get("tag_names")
 
-        if tag_names and isinstance(tag_names, list):
-            # Convert array to semicolon-delimited string as required by FRED API
-            self.query_params["tag_names"] = ";".join(tag_names)
+        if tag_names:
+            self.query_params["tag_names"] = join_tag_names(tag_names)
 
     def _get_records_key(self) -> str:
         return "tags"
@@ -463,17 +399,31 @@ class SeriesVintageDatesStream(SeriesBasedFREDStream):
     def _get_series_records(
         self, series_id: str, context: Context | None
     ) -> t.Iterable[dict]:
-        """Get vintage dates for a specific series ID."""
+        """Get vintage dates for a specific series ID.
+
+        Paginated per FRED docs: /fred/series/vintagedates supports limit (max 10000) and offset.
+        """
         url = self.get_url()
-        params = self.query_params.copy()
-        params.update({"series_id": series_id})
+        offset = 0
+        limit = 10000  # FRED docs max for this endpoint
 
-        # Skip realtime parameters - let FRED use defaults for complete vintage data
-        # API has issues with realtime parameters on vintagedates endpoint
+        while True:
+            params = self.query_params.copy()
+            params.update({"series_id": series_id, "limit": limit, "offset": offset})
 
-        response_data = self._fetch_with_retry(url, params)
-        vintage_dates = response_data.get("vintage_dates", [])
+            # Skip realtime parameters - let FRED use defaults for complete vintage data
+            # API has issues with realtime parameters on vintagedates endpoint
 
-        for date in vintage_dates:
-            record = {"date": date, "series_id": series_id}
-            yield self.post_process(record, context)
+            response_data = self._fetch_with_retry(url, params)
+            vintage_dates = response_data.get("vintage_dates", [])
+
+            if not vintage_dates:
+                break
+
+            for date in vintage_dates:
+                record = {"date": date, "series_id": series_id}
+                yield self.post_process(record, context)
+
+            if len(vintage_dates) < limit:
+                break
+            offset += limit

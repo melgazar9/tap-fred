@@ -16,7 +16,7 @@ import requests
 from singer_sdk.helpers.types import Context
 from singer_sdk.streams import RESTStream
 
-from tap_fred.helpers import clean_json_keys, generate_surrogate_key
+from tap_fred.helpers import clean_json_keys, coerce_str_to_bool, generate_surrogate_key
 
 
 class FREDStream(RESTStream, ABC):
@@ -33,10 +33,10 @@ class FREDStream(RESTStream, ABC):
             self.config.get("max_requests_per_minute", 60)
         )
         self._min_interval = float(self.config.get("min_throttle_seconds", 1.0))
-        self._throttle_lock = threading.Lock()
-        self._request_timestamps = (
-            deque()
-        )  # Track request timestamps for sliding window
+        # Use shared rate limiter from tap so all streams respect the same budget
+        self._throttle_lock = tap._shared_throttle_lock
+        self._request_timestamps = tap._shared_request_timestamps
+        self._skipped_partitions: list[dict] = []  # Track skipped partitions per stream
 
         # Initialize configurable parameters
         self.query_params = {}
@@ -113,8 +113,8 @@ class FREDStream(RESTStream, ABC):
         base=5,
         max_value=300,
         jitter=backoff.full_jitter,
-        max_tries=3,  # Reduced from 12 - give up faster
-        max_time=30,  # Reduced from 1800 - give up faster
+        max_tries=5,
+        max_time=300,  # Allow enough time for 429 rate-limit recovery (60s waits)
         giveup=lambda e: (
             # Give up on HTTP errors except for specific retryable ones
             isinstance(e, requests.exceptions.HTTPError)
@@ -188,18 +188,35 @@ class FREDStream(RESTStream, ABC):
             if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
                 status_code = e.response.status_code
 
+                if status_code == 429:
+                    # Rate limited — wait for FRED's 60-second window to reset, then retry
+                    logging.warning(
+                        f"Rate limited (429) for {redacted_url}. "
+                        f"Waiting 60s for rate window to reset."
+                    )
+                    time.sleep(60)
+                    raise e
+
                 if status_code >= 500:
-                    # 500-level errors indicate server issues - let backoff retry them
                     logging.warning(
                         f"Server error {status_code} for {redacted_url}, will retry if attempts remain"
                     )
                     raise e
 
-                if 400 <= status_code < 500 and status_code not in [429, 502, 503, 504]:
-                    logging.warning(
-                        f"Client error {status_code} for {redacted_url}, skipping"
-                    )
-                    return {}
+                # Non-retryable client errors (400-499 except 429)
+                response_body = e.response.text[:200] if e.response.text else "no body"
+                logging.warning(
+                    f"Client error {status_code} for {redacted_url}: "
+                    f"{response_body}. Skipping - data may be missing."
+                )
+                self._skipped_partitions.append({
+                    "stream": self.name,
+                    "url": redacted_url,
+                    "status_code": status_code,
+                })
+                if self.config.get("strict_mode", False):
+                    raise
+                return {}
 
             error_message = (
                 f"{e.response.status_code} Client Error: {e.response.reason} for url: {redacted_url}"
@@ -232,12 +249,39 @@ class FREDStream(RESTStream, ABC):
                 f"(HTTP {status_code}). Skipping this partition and continuing with others."
             )
             self.logger.debug(f"Error details for {resource_id}: {str(e)}")
+            self._skipped_partitions.append({
+                "stream": self.name,
+                "partition_key": resource_id_key,
+                "partition_value": resource_id,
+                "error": f"HTTP {status_code}",
+            })
+            if self.config.get("strict_mode", False):
+                raise
         except Exception as e:
             self.logger.error(
                 f"Unexpected error extracting {resource_id_key}={resource_id}: {type(e).__name__}. "
                 f"Skipping this partition and continuing with others."
             )
             self.logger.debug(f"Error details for {resource_id}: {str(e)}")
+            self._skipped_partitions.append({
+                "stream": self.name,
+                "partition_key": resource_id_key,
+                "partition_value": resource_id,
+                "error": type(e).__name__,
+            })
+            if self.config.get("strict_mode", False):
+                raise
+
+    def finalize_state_progress_markers(self, state: dict | None = None) -> None:
+        """Emit aggregated skip summary after all partitions have been synced."""
+        super().finalize_state_progress_markers(state)
+        if self._skipped_partitions:
+            self.logger.warning(
+                f"Stream '{self.name}' completed with "
+                f"{len(self._skipped_partitions)} skipped partition(s):"
+            )
+            for skip_info in self._skipped_partitions:
+                self.logger.warning(f"  - {skip_info}")
 
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
         """Retrieve records from the API - uses pagination if _paginate flag is True."""
@@ -286,41 +330,40 @@ class FREDStream(RESTStream, ABC):
         # Default implementation - subclasses should override this
         return "data"
 
+    # Fields that FRED returns as strings but should be integers
+    _INTEGER_FIELDS = frozenset({
+        "id", "parent_id", "category_id", "release_id", "source_id",
+        "popularity", "series_count", "group_popularity",
+    })
+
     def post_process(self, record: dict, context: Context | None = None) -> dict:
-        """Transform raw data to match expected structure."""
-        # Clean JSON keys to snake_case
+        """Transform raw FRED API response record into schema-compliant format.
+
+        Handles: snake_case keys, FRED missing-value marker ("."), type coercion
+        for integer fields, press_release boolean, and partition context injection.
+        """
         record = clean_json_keys(record)
 
-        for key, value in record.items():
-            if value == ".":
-                record[key] = None
+        # Replace FRED's "." missing-value marker with None
+        record = {k: (None if v == "." else v) for k, v in record.items()}
 
-        # Convert common integer fields to proper types for schema validation
-        integer_fields = [
-            "id",
-            "parent_id",
-            "category_id",
-            "release_id",
-            "source_id",
-            "popularity",
-            "series_count",
-            "group_popularity",
-        ]
-        for field in integer_fields:
-            if field in record and record[field] is not None:
+        # Coerce known integer fields
+        for field in self._INTEGER_FIELDS & record.keys():
+            if record[field] is not None:
                 try:
                     record[field] = int(record[field])
                 except (ValueError, TypeError):
-                    pass  # Keep original value if conversion fails
+                    pass
 
-        # Add context-based fields (e.g., category_id from partition context)
+        # Coerce FRED's string booleans (e.g., press_release: "true" -> True)
+        if "press_release" in record:
+            record["press_release"] = coerce_str_to_bool(record["press_release"])
+
+        # Inject partition context IDs
         if context:
-            # Integer IDs for categories, releases, and sources
-            for key in ["category_id", "release_id", "source_id"]:
+            for key in ("category_id", "release_id", "source_id"):
                 if key in context and context[key] is not None:
                     record[key] = int(context[key])
-
-            # String IDs for series (e.g., "GDP", "UNRATE")
             if "series_id" in context and context["series_id"] is not None:
                 record["series_id"] = str(context["series_id"])
 
@@ -338,21 +381,21 @@ class FREDStream(RESTStream, ABC):
         # Use stream-specific params if available, otherwise defaults
         cfg_params = stream_params if stream_params is not None else default_params
 
-        if cfg_params is None:
+        if isinstance(cfg_params, list):
+            cfg_params = cfg_params[0] if cfg_params else {}
+        if not isinstance(cfg_params, dict):
             cfg_params = {}
 
-        # Support both single dict and list of dicts (use first item for now)
-        if isinstance(cfg_params, list) and len(cfg_params) > 0:
-            cfg_params = cfg_params[0]
-        elif isinstance(cfg_params, list):
-            cfg_params = {}
-
-        if isinstance(cfg_params, dict):
-            self.query_params = cfg_params.get("query_params", {}).copy()
+        self.query_params = cfg_params.get("query_params", {}).copy()
 
         # Always ensure api_key is in query_params
         self.query_params["api_key"] = self.config["api_key"]
         self.query_params["file_type"] = "json"
+
+        # Map start_date config to observation_start API param for series_observations
+        start_date = self.config.get("start_date")
+        if start_date and self.name == "series_observations":
+            self.query_params["observation_start"] = self._format_date(start_date)
 
         # Add realtime parameters based on data_mode
         self._add_realtime_params()
@@ -394,6 +437,8 @@ class FREDStream(RESTStream, ABC):
 
         while True:
             params = self.query_params.copy()
+            if context:
+                params.update(context)
             params.update(
                 {
                     "limit": limit,

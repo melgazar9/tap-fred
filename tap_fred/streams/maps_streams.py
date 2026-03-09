@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import typing as t
-import jsonpath_ng
+from itertools import product
+
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
@@ -97,26 +98,17 @@ class GeoFREDRegionalDataStream(FREDStream):
                 "Add 'units' to each geofred_regional_params entry."
             )
 
-        # Generate all combinations including required parameters
-        partitions = []
-        for series_group in series_groups:
-            for region_type in region_types:
-                for season in seasons:
-                    partitions.append(
-                        {
-                            "series_group": series_group,
-                            "region_type": region_type,
-                            "season": season,
-                            "date": param_set["date"],
-                            "units": param_set["units"],
-                            # Optional parameters if provided
-                            "frequency": param_set.get(
-                                "frequency", "a"
-                            ),  # Default to annual
-                        }
-                    )
-
-        return partitions
+        return [
+            {
+                "series_group": sg,
+                "region_type": rt,
+                "season": s,
+                "date": param_set["date"],
+                "units": param_set["units"],
+                "frequency": param_set.get("frequency", "a"),
+            }
+            for sg, rt, s in product(series_groups, region_types, seasons)
+        ]
 
     @staticmethod
     def _expand_series_groups(series_group):
@@ -159,7 +151,11 @@ class GeoFREDRegionalDataStream(FREDStream):
         return ["SA", "NSA", "SSA", "SAAR", "NSAAR"]
 
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
-        """Retrieve records using partition-based parameter sets."""
+        """Retrieve records using partition-based parameter sets.
+
+        GeoFRED /regional/data returns data nested under meta.data as a date-keyed dict:
+        {"meta": {"title": "...", "data": {"2013-01-01": [{"region": "...", "value": ...}, ...]}}}
+        """
         if not context:
             raise ValueError("GeoFREDRegionalDataStream requires partition context")
 
@@ -170,24 +166,32 @@ class GeoFREDRegionalDataStream(FREDStream):
         params.update(context)
 
         response_data = self._make_request(url, params)
+        if not response_data:
+            return
 
-        # Extract records using JSONPath
-        jsonpath_expr = jsonpath_ng.parse(self.records_jsonpath)
-        matches = [match.value for match in jsonpath_expr.find(response_data)]
+        # Data is nested under meta.data as a date-keyed dict
+        meta = response_data.get("meta", {})
+        data = meta.get("data", {})
 
-        for record in matches:
-            # Enrich record with partition parameters for identification
-            record.update(
-                {
-                    "series_group": context.get("series_group"),
-                    "region_type": context.get("region_type"),
-                    "season": context.get("season"),
-                    "units": context.get("units"),
-                    "frequency": context.get("frequency"),
-                }
-            )
-
-            yield self.post_process(record, context)
+        if isinstance(data, dict):
+            for date_str, region_records in data.items():
+                if not isinstance(region_records, list):
+                    continue
+                for record in region_records:
+                    if not isinstance(record, dict):
+                        continue
+                    # Enrich record with partition parameters and date
+                    record.update(
+                        {
+                            "date": date_str,
+                            "series_group": context.get("series_group"),
+                            "region_type": context.get("region_type"),
+                            "season": context.get("season"),
+                            "units": context.get("units"),
+                            "frequency": context.get("frequency"),
+                        }
+                    )
+                    yield self.post_process(record, context)
 
 
 class GeoFREDSeriesDataStream(FREDStream):
@@ -287,7 +291,11 @@ class GeoFREDSeriesDataStream(FREDStream):
             )
 
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
-        """Retrieve records for a specific series ID from partition context."""
+        """Retrieve records for a specific series ID from partition context.
+
+        GeoFRED /series/data returns data as a date-keyed dict:
+        {"meta": {...}, "data": {"2020-01-01": [{"region": "...", "value": "..."}, ...], ...}}
+        """
         if not context or "series_id" not in context:
             raise ValueError(
                 "GeoFREDSeriesDataStream requires series_id in partition context"
@@ -299,23 +307,46 @@ class GeoFREDSeriesDataStream(FREDStream):
         params["series_id"] = series_id
 
         response_data = self._make_request(url, params)
+        if not response_data:
+            return
+
+        # Data is nested under meta.data as a date-keyed dict
         meta = response_data.get("meta", {})
+        data = meta.get("data", {})
 
-        # Extract records using JSONPath
-        jsonpath_expr = jsonpath_ng.parse(self.records_jsonpath)
-        matches = [match.value for match in jsonpath_expr.find(response_data)]
-
-        for record in matches:
-            # Enrich with metadata from API response
-            record.update(
-                {
-                    "series_id": series_id,
-                    "title": meta.get("title", ""),
-                    "region_type": meta.get("region_type", ""),
-                    "seasonality": meta.get("seasonality", ""),
-                    "units": meta.get("units", ""),
-                    "frequency": meta.get("frequency", ""),
-                }
-            )
-
-            yield self.post_process(record, context)
+        # Data is a dict keyed by date, each value is a list of region records
+        if isinstance(data, dict):
+            for date_str, region_records in data.items():
+                if not isinstance(region_records, list):
+                    continue
+                for record in region_records:
+                    if not isinstance(record, dict):
+                        continue
+                    record.update(
+                        {
+                            "series_id": series_id,
+                            "date": date_str,
+                            "title": meta.get("title", ""),
+                            "region_type": meta.get("region_type", ""),
+                            "seasonality": meta.get("seasonality", ""),
+                            "units": meta.get("units", ""),
+                            "frequency": meta.get("frequency", ""),
+                        }
+                    )
+                    yield self.post_process(record, context)
+        elif isinstance(data, list):
+            # Fallback for flat array format
+            for record in data:
+                if not isinstance(record, dict):
+                    continue
+                record.update(
+                    {
+                        "series_id": series_id,
+                        "title": meta.get("title", ""),
+                        "region_type": meta.get("region_type", ""),
+                        "seasonality": meta.get("seasonality", ""),
+                        "units": meta.get("units", ""),
+                        "frequency": meta.get("frequency", ""),
+                    }
+                )
+                yield self.post_process(record, context)

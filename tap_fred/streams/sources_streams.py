@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import typing as t
+
 from singer_sdk import typing as th
-from singer_sdk.helpers.types import Context
 
-from tap_fred.client import SourceBasedFREDStream
+from tap_fred.client import FREDStream, SourceBasedFREDStream
 
 
-class SourcesStream(SourceBasedFREDStream):
+class SourcesStream(FREDStream):
     """Stream for FRED sources - /fred/sources endpoint.
 
+    List-all endpoint - returns all sources. Does NOT accept source_id filter.
     Uses pagination per FRED API documentation (limit 1-1000, default 1000).
     """
 
@@ -117,11 +118,3 @@ class SourceReleasesStream(SourceBasedFREDStream):
 
     def _get_records_key(self) -> str:
         return "releases"
-
-    def post_process(self, record: dict, context: Context | None = None) -> dict:
-        """Transform raw data to match expected structure."""
-        # Apply business logic BEFORE calling super()
-        if "press_release" in record and isinstance(record["press_release"], str):
-            record["press_release"] = record["press_release"].lower() == "true"
-
-        return super().post_process(record, context)

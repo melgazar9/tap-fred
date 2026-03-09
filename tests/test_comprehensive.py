@@ -22,6 +22,18 @@ class TestTapFREDComprehensive(unittest.TestCase):
             "source_ids": ["1", "3"],
             "tag_names": ["gdp", "unemployment"],
             "start_date": "2024-01-01",
+            # GeoFRED config required for conditional stream registration
+            "geofred_regional_params": [
+                {"series_group": "882", "region_type": "state", "season": "SA", "date": "2013-01-01"},
+            ],
+            "geofred_series_ids": ["CAHOWN"],
+            # SeriesSearchRelatedTags requires both search_text and tag_names
+            "series_search_related_tags_params": {
+                "query_params": {
+                    "series_search_text": "GDP",
+                    "tag_names": ["gdp", "usa"],
+                },
+            },
         }
 
     def test_fred_mode_config(self):
@@ -58,8 +70,7 @@ class TestTapFREDComprehensive(unittest.TestCase):
         tap = TapFRED(config=config)
 
         # Get all stream maps
-        stream_maps = tap.get_stream_maps()
-        stream_names = {stream.stream for stream in stream_maps}
+        stream_names = set(tap.streams.keys())
 
         # Verify we have the core streams
         expected_core_streams = {
@@ -85,8 +96,7 @@ class TestTapFREDComprehensive(unittest.TestCase):
         config = {**self.base_config, "data_mode": "FRED"}
         tap = TapFRED(config=config)
 
-        stream_maps = tap.get_stream_maps()
-        total_streams = len(stream_maps)
+        total_streams = len(tap.streams)
 
         # Verify we have 32 streams total as documented in CLAUDE.md
         self.assertEqual(
@@ -203,8 +213,7 @@ class TestTapFREDComprehensive(unittest.TestCase):
         config = {**self.base_config, "data_mode": "FRED"}
         tap = TapFRED(config=config)
 
-        stream_maps = tap.get_stream_maps()
-        stream_names = {stream.stream for stream in stream_maps}
+        stream_names = set(tap.streams.keys())
 
         # Test Series streams (10 expected)
         series_streams = {name for name in stream_names if name.startswith("series")}
