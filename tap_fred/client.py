@@ -429,35 +429,119 @@ class FREDStream(RESTStream, ABC):
             self.query_params.pop("realtime_end", None)
 
     def _paginate_records(self, context: Context | None) -> t.Iterable[dict]:
-        """Shared pagination logic for FRED streams that use offset/limit."""
+        """Shared pagination logic for FRED streams that use offset/limit.
+
+        Captures the API-reported ``count`` from the first page response and
+        validates extracted totals against it.  Handles three failure modes:
+          1. API offset cap (e.g. /series/search hard-caps at 5 000)
+          2. Transient page-level errors (429 / 500 mid-pagination)
+          3. Approximate ``count`` values on tag-related endpoints
+        """
         url = self.get_url()
         offset = 0
-        # Get limit from config or use endpoint-specific defaults from FRED API docs
         limit = self._get_pagination_limit()
+        total_yielded = 0
+        api_reported_count: int | None = None
 
         while True:
             params = self.query_params.copy()
             if context:
                 params.update(context)
-            params.update(
-                {
-                    "limit": limit,
-                    "offset": offset,
-                }
-            )
+            params.update({"limit": limit, "offset": offset})
 
-            records_yielded = 0
-            for record in self._fetch_and_process_records(url, params, context):
-                yield record
-                records_yielded += 1
-
-            if records_yielded == 0:
+            # --- fetch one page -------------------------------------------------
+            try:
+                response_data = self._make_request(url, params)
+            except requests.exceptions.HTTPError as page_err:
+                # Detect FRED's undocumented offset cap
+                # (e.g. /series/search returns 400 at offset > 4000)
+                resp = getattr(page_err, "response", None)
+                body = resp.text[:300] if resp is not None and resp.text else ""
+                if resp is not None and resp.status_code == 400 and "maximum" in body.lower():
+                    self.logger.warning(
+                        f"Stream '{self.name}': API offset cap reached at offset={offset} "
+                        f"({total_yielded} records extracted). Response: {body.strip()}"
+                    )
+                    break
+                # Any other page-level error
+                self.logger.error(
+                    f"Stream '{self.name}': Page fetch failed at offset={offset} "
+                    f"after retries ({page_err}). "
+                    f"Extracted {total_yielded} records before failure."
+                )
+                if self.config.get("strict_mode", False):
+                    raise
+                break
+            except Exception as page_err:
+                self.logger.error(
+                    f"Stream '{self.name}': Unexpected error at offset={offset} "
+                    f"({type(page_err).__name__}: {page_err}). "
+                    f"Extracted {total_yielded} records before failure."
+                )
+                if self.config.get("strict_mode", False):
+                    raise
                 break
 
-            if records_yielded < limit:
+            # Empty dict means _make_request handled a 4xx in permissive mode
+            if not response_data:
+                self.logger.warning(
+                    f"Stream '{self.name}': Empty response at offset={offset}. "
+                    f"Extracted {total_yielded} records before stopping."
+                )
+                break
+
+            # --- capture API-reported total from the first page -----------------
+            if api_reported_count is None:
+                api_reported_count = response_data.get("count")
+                if api_reported_count is not None:
+                    self.logger.info(
+                        f"Stream '{self.name}': API reports {api_reported_count} "
+                        f"total records available."
+                    )
+
+            # --- yield records from this page -----------------------------------
+            records = response_data.get(self._get_records_key(), [])
+            page_yielded = 0
+            for record in records:
+                yield self.post_process(record, context)
+                page_yielded += 1
+            total_yielded += page_yielded
+
+            if page_yielded == 0 or page_yielded < limit:
                 break
 
             offset += limit
+
+        # --- completeness validation --------------------------------------------
+        self._log_pagination_completeness(total_yielded, api_reported_count)
+
+    def _log_pagination_completeness(
+        self, total_yielded: int, api_reported_count: int | None
+    ) -> None:
+        """Compare extracted record count against API-reported total.
+
+        The FRED API ``count`` field is *approximate* on tag-related endpoints
+        and *exact* on most others.  A shortfall does not always indicate data
+        loss — it may be an API offset cap or a stale ``count`` cache.
+        """
+        if api_reported_count is None:
+            return
+
+        if total_yielded >= api_reported_count:
+            self.logger.info(
+                f"Stream '{self.name}': Pagination complete — "
+                f"{total_yielded}/{api_reported_count} records extracted."
+            )
+            return
+
+        shortfall = api_reported_count - total_yielded
+        pct = (shortfall / api_reported_count) * 100 if api_reported_count else 0
+        self.logger.warning(
+            f"Stream '{self.name}': Extracted {total_yielded}/{api_reported_count} "
+            f"records ({shortfall} fewer, {pct:.1f}% gap). Possible causes: "
+            f"API pagination offset cap, approximate count field, or data "
+            f"changed during extraction."
+        )
 
     def _get_pagination_limit(self) -> int:
         """Get appropriate pagination limit based on endpoint and FRED API documentation."""

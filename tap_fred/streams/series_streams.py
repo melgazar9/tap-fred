@@ -344,12 +344,16 @@ class SeriesTagsStream(SeriesBasedFREDStream):
 
 
 class SeriesUpdatesStream(FREDStream):
-    """Stream for FRED series updates - /fred/series/updates endpoint."""
+    """Stream for FRED series updates - /fred/series/updates endpoint.
+
+    Uses ``last_updated`` as replication key so subsequent runs only emit
+    series that were updated since the previous sync's bookmark.
+    """
 
     name = "series_updates"
     path = "/series/updates"
     primary_keys: t.ClassVar[list[str]] = ["id"]
-    replication_key = None
+    replication_key = "last_updated"
     records_jsonpath = "$.seriess[*]"
     _add_surrogate_key = False
     _paginate = True

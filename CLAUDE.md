@@ -79,6 +79,29 @@ Streams requiring specific config are only registered in `discover_streams()` wh
 - `finalize_state_progress_markers()` emits an aggregated WARNING-level skip summary after each stream completes (count + details of all skipped partitions).
 - Partition-level errors in `_safe_partition_extraction` log individual ERROR per skip, then re-raise if `strict_mode=true`.
 
+### Pagination Completeness Validation
+
+`_paginate_records` captures the API-reported `count` from the first page and compares against total extracted records at the end. Three known behaviors:
+
+| Endpoint group | `count` accuracy | Notes |
+|---|---|---|
+| releases, sources, observations, vintage dates | **Exact** | count == extractable records |
+| tags, related_tags, search_tags | **Approximate** | count is cached/stale; actual records are ~0.5-1% fewer |
+| series/search | **Misleading** | Reports 80K+ but API hard-caps at offset 4001 (max 5,000 accessible). Undocumented. |
+
+Page-level errors mid-pagination (429, 500, offset cap 400) are handled:
+- **Permissive mode**: logs warning with extracted-so-far count, stops pagination, continues sync
+- **Strict mode**: re-raises the error, fails the stream
+
+### Incremental Replication Strategy
+
+| Stream | replication_key | Behavior |
+|---|---|---|
+| `series_observations` | `realtime_start` | Meaningful in **point-in-time mode** only. In FRED/single-vintage ALFRED mode, all records share the same `realtime_start`, so the bookmark doesn't filter — effectively FULL_TABLE. |
+| `series_vintage_dates` | `date` | New vintage dates always have later dates, so bookmark works correctly. |
+| `series_updates` | `last_updated` | Large stream (90K+). SDK-side filtering emits only series updated since last bookmark. API still fetches all records (FRED has no server-side "updated since" filter). |
+| All other streams | None (FULL_TABLE) | Metadata streams with small datasets. FRED API has no "updated since" parameter on these endpoints. Re-fetching everything each run is correct. |
+
 ## Migration Notes
 
 ### PK Change for series_observations

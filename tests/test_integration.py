@@ -918,6 +918,140 @@ class TestPaginationCorrectness(unittest.TestCase):
         # Only 1 call — stopped immediately on empty
         mock_request.assert_called_once()
 
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_pagination_logs_completeness_when_count_matches(self, mock_request):
+        """Pagination must log info when extracted count matches API count."""
+
+        class CountedStream(FREDStream):
+            name = "test_counted"
+            path = "/test"
+            records_jsonpath = "$.items[*]"
+            _paginate = True
+            schema = th.PropertiesList(th.Property("id", th.StringType)).to_dict()
+
+            def _get_records_key(self):
+                return "items"
+
+            def _get_pagination_limit(self):
+                return 2
+
+        # Page 1: full page with count metadata, page 2: partial
+        mock_request.side_effect = [
+            {"count": 3, "items": [{"id": "a"}, {"id": "b"}]},
+            {"count": 3, "items": [{"id": "c"}]},
+        ]
+
+        tap = TapFRED(config=self.config)
+        stream = CountedStream(tap)
+        records = list(stream._paginate_records(context=None))
+
+        self.assertEqual(len(records), 3)
+
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_pagination_warns_on_shortfall(self, mock_request):
+        """Pagination must warn when extracted count < API-reported count."""
+
+        class ShortfallStream(FREDStream):
+            name = "test_shortfall"
+            path = "/test"
+            records_jsonpath = "$.items[*]"
+            _paginate = True
+            schema = th.PropertiesList(th.Property("id", th.StringType)).to_dict()
+
+            def _get_records_key(self):
+                return "items"
+
+            def _get_pagination_limit(self):
+                return 1000
+
+        # API says 5000 records exist but only returns 2
+        mock_request.return_value = {
+            "count": 5000,
+            "items": [{"id": "a"}, {"id": "b"}],
+        }
+
+        tap = TapFRED(config=self.config)
+        stream = ShortfallStream(tap)
+
+        with self.assertLogs("tap-fred.test_shortfall", level="WARNING") as log:
+            records = list(stream._paginate_records(context=None))
+
+        self.assertEqual(len(records), 2)
+        # Must have emitted a warning about the shortfall
+        shortfall_warnings = [m for m in log.output if "fewer" in m]
+        self.assertTrue(shortfall_warnings, "Expected shortfall warning not emitted")
+
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_pagination_handles_offset_cap_error(self, mock_request):
+        """Pagination must handle FRED's undocumented offset cap gracefully."""
+
+        class CappedStream(FREDStream):
+            name = "test_capped"
+            path = "/test"
+            records_jsonpath = "$.items[*]"
+            _paginate = True
+            schema = th.PropertiesList(th.Property("id", th.StringType)).to_dict()
+
+            def _get_records_key(self):
+                return "items"
+
+            def _get_pagination_limit(self):
+                return 2
+
+        call_count = 0
+
+        def capped_response(url, params):
+            nonlocal call_count
+            call_count += 1
+            offset = params.get("offset", 0)
+            if offset < 4:
+                return {"count": 100, "items": [{"id": str(offset)}, {"id": str(offset + 1)}]}
+            # Simulate FRED's offset cap: 400 error
+            resp = requests.models.Response()
+            resp.status_code = 400
+            resp._content = b'{"error_code": 400, "error_message": "Exceeded 5000 maximum searchable results"}'
+            raise requests.exceptions.HTTPError(response=resp)
+
+        mock_request.side_effect = capped_response
+
+        tap = TapFRED(config=self.config)
+        stream = CappedStream(tap)
+        records = list(stream._paginate_records(context=None))
+
+        # Should have gotten records from pages before the cap
+        self.assertEqual(len(records), 4)
+
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_pagination_strict_mode_raises_on_page_error(self, mock_request):
+        """In strict mode, a page-level error must re-raise, not silently stop."""
+
+        class StrictStream(FREDStream):
+            name = "test_strict_page"
+            path = "/test"
+            records_jsonpath = "$.items[*]"
+            _paginate = True
+            schema = th.PropertiesList(th.Property("id", th.StringType)).to_dict()
+
+            def _get_records_key(self):
+                return "items"
+
+            def _get_pagination_limit(self):
+                return 2
+
+        def error_on_second_page(url, params):
+            if params.get("offset", 0) == 0:
+                return {"items": [{"id": "a"}, {"id": "b"}]}
+            raise requests.exceptions.ConnectionError("network failure")
+
+        mock_request.side_effect = error_on_second_page
+
+        strict_config = {**self.config, "strict_mode": True}
+        tap = TapFRED(config=strict_config)
+        stream = StrictStream(tap)
+
+        with self.assertRaises(requests.exceptions.ConnectionError):
+            list(stream._paginate_records(context=None))
+
 
 class TestWildcardDiscovery(unittest.TestCase):
     """Verify wildcard partition generation produces non-zero, plausible counts."""
