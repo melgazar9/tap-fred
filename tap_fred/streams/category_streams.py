@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import requests
+
 import typing as t
 from collections import deque
 from singer_sdk import typing as th
@@ -72,8 +74,12 @@ class CategoryStream(FREDStream):
                         discovered_ids.add(category["id"])
                         yield self.post_process(category, context)
 
-                except Exception as e:
+                except RuntimeError:
+                    raise  # Data leakage guards — never swallow
+                except requests.exceptions.RequestException as e:
                     self.logger.warning(f"Failed to fetch category {category_id}: {e}")
+                    if self.config.get("strict_mode", False):
+                        raise
                     continue
 
                 processed.add(category_id)
@@ -96,10 +102,14 @@ class CategoryStream(FREDStream):
                         ):
                             queue.append(child_id)
 
-                except Exception as e:
+                except RuntimeError:
+                    raise  # Data leakage guards — never swallow
+                except requests.exceptions.RequestException as e:
                     self.logger.warning(
                         f"Failed to fetch children for category {category_id}: {e}"
                     )
+                    if self.config.get("strict_mode", False):
+                        raise
                     continue
         else:
             # For specific IDs, use normal partition processing

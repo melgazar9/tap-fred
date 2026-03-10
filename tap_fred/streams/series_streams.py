@@ -83,6 +83,7 @@ class SeriesObservationsStream(PointInTimePartitionStream):
 
     # Incremental replication by realtime_start (vintage publication date)
     replication_key = "realtime_start"
+    is_sorted = True  # Within each partition, realtime_start values are identical (=vintage_date)
 
     schema = th.PropertiesList(
         th.Property("series_id", th.StringType, description="FRED series identifier"),
@@ -101,6 +102,11 @@ class SeriesObservationsStream(PointInTimePartitionStream):
             "realtime_end",
             th.DateType,
             description="Real-time end date for this observation",
+        ),
+        th.Property(
+            "vintage_date",
+            th.DateType,
+            description="Vintage date for point-in-time mode (null in standard mode)",
         ),
     ).to_dict()
 
@@ -384,14 +390,22 @@ class SeriesUpdatesStream(FREDStream):
 
 
 class SeriesVintageDatesStream(SeriesBasedFREDStream):
-    """Stream for FRED series vintage dates - /fred/series/vintagedates endpoint."""
+    """Stream for FRED series vintage dates - /fred/series/vintagedates endpoint.
+
+    Uses SDK partitions (one per series_id) so each series maintains its own
+    independent bookmark for the ``date`` replication key.  Without per-series
+    partitions the bookmark would be global, causing vintage dates for
+    slower-updating series to be silently dropped on subsequent runs.
+    """
 
     name = "series_vintage_dates"
     path = "/series/vintagedates"
-    primary_keys: t.ClassVar[list[str]] = ["date"]
+    primary_keys: t.ClassVar[list[str]] = ["series_id", "date"]
     replication_key = "date"
+    is_sorted = True  # Vintage dates are returned in chronological order by FRED API
     records_jsonpath = "$.vintage_dates[*]"
     _add_surrogate_key = False
+    _resource_id_key = "series_id"
 
     schema = th.PropertiesList(
         th.Property("date", th.DateType, description="Vintage date"),
@@ -400,16 +414,40 @@ class SeriesVintageDatesStream(SeriesBasedFREDStream):
         ),
     ).to_dict()
 
+    @property
+    def partitions(self):
+        """Generate per-series partitions for independent bookmarks."""
+        cached_series = self._tap.get_cached_series_ids()
+        return [{"series_id": item["series_id"]} for item in cached_series]
+
+    def get_records(self, context: Context | None) -> t.Iterable[dict]:
+        """Get vintage dates for a single series from partition context."""
+        if context and "series_id" in context:
+            yield from self._safe_partition_extraction(
+                self._get_series_records(context["series_id"], context),
+                context["series_id"],
+                "series_id",
+            )
+        else:
+            yield from super().get_records(context)
+
     def _get_series_records(
         self, series_id: str, context: Context | None
     ) -> t.Iterable[dict]:
         """Get vintage dates for a specific series ID.
 
         Paginated per FRED docs: /fred/series/vintagedates supports limit (max 10000) and offset.
+        Filters by bookmark to avoid re-emitting already-synced dates.
         """
         url = self.get_url()
         offset = 0
         limit = 10000  # FRED docs max for this endpoint
+
+        # Get bookmark to skip already-synced dates
+        bookmark_value = None
+        if context:
+            state = self.get_context_state(context)
+            bookmark_value = state.get("replication_key_value")
 
         while True:
             params = self.query_params.copy()
@@ -425,6 +463,9 @@ class SeriesVintageDatesStream(SeriesBasedFREDStream):
                 break
 
             for date in vintage_dates:
+                # Skip dates at or before the bookmark (already synced)
+                if bookmark_value and date <= str(bookmark_value)[:10]:
+                    continue
                 record = {"date": date, "series_id": series_id}
                 yield self.post_process(record, context)
 

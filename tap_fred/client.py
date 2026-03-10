@@ -257,6 +257,11 @@ class FREDStream(RESTStream, ABC):
             })
             if self.config.get("strict_mode", False):
                 raise
+        except RuntimeError:
+            # Data leakage guards raise RuntimeError — ALWAYS propagate.
+            # Silently swallowing a data leakage error would corrupt
+            # backtesting results.  This is never a recoverable error.
+            raise
         except Exception as e:
             self.logger.error(
                 f"Unexpected error extracting {resource_id_key}={resource_id}: {type(e).__name__}. "
@@ -718,6 +723,8 @@ class PointInTimePartitionStream(FREDStream):
         """Return partitions based on resource IDs and vintage dates (if point-in-time mode)."""
         cache_method = getattr(self._tap, f"get_cached_{self._resource_type}_ids")
         resource_ids = cache_method()
+        if not resource_ids:
+            return []
         if isinstance(resource_ids[0], dict):
             # Extract the ID from dict format
             resource_ids = [item[self._resource_id_key] for item in resource_ids]
@@ -736,13 +743,17 @@ class PointInTimePartitionStream(FREDStream):
             vintage_dates = self._get_vintage_dates_for_resource(resource_id)
 
             if not vintage_dates:
-                # No vintage dates found - series never revised or all filtered out
-                # Create standard partition to ensure series is still extracted
+                # SKIP — never fall back to current data in point-in-time mode.
+                # Falling back would silently introduce today's revised data into
+                # a vintage dataset, contaminating backtesting results.
                 self.logger.warning(
-                    f"No vintage dates for {resource_id} in point-in-time mode. "
-                    f"Extracting with current data."
+                    f"Skipping {self._resource_id_key}='{resource_id}' — no vintage "
+                    f"dates in point-in-time range "
+                    f"[{self.config.get('point_in_time_start', 'unbounded')}, "
+                    f"{self.config.get('point_in_time_end', 'unbounded')}]. "
+                    f"Will NOT fall back to current data (prevents data leakage)."
                 )
-                partitions.append({self._resource_id_key: resource_id})
+                continue
             else:
                 # Create partition for each vintage date
                 for vintage_date in vintage_dates:
@@ -804,6 +815,14 @@ class PointInTimePartitionStream(FREDStream):
             )
 
         response_data = self._fetch_with_retry(url, params)
+
+        if not response_data:
+            self.logger.warning(
+                f"Empty API response for {self._resource_id_key}='{resource_id}' "
+                f"(likely a 4xx error in permissive mode). No records extracted."
+            )
+            return
+
         records_key = self._get_records_key()
         records = response_data.get(records_key, [])
 
@@ -813,16 +832,59 @@ class PointInTimePartitionStream(FREDStream):
             if context and "vintage_date" in context:
                 record["vintage_date"] = context["vintage_date"]
             record = self.post_process(record, context)
+
+            # Runtime data-leakage guard: in point-in-time mode, every record's
+            # realtime_start MUST equal the requested vintage_date.  A mismatch
+            # means the FRED API returned data from a different vintage — this
+            # would silently corrupt backtesting results.
+            if context and "vintage_date" in context:
+                expected = str(context["vintage_date"])[:10]
+                actual = str(record.get("realtime_start", ""))[:10]
+                if actual != expected:
+                    raise RuntimeError(
+                        f"DATA LEAKAGE: {self._resource_id_key}='{resource_id}' "
+                        f"vintage_date='{expected}' but record has "
+                        f"realtime_start='{actual}'. Aborting to prevent "
+                        f"data contamination."
+                    )
+
             yield record
 
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
-        """Retrieve records for a specific resource ID from context (partition support)."""
+        """Retrieve records for a specific resource ID from context (partition support).
+
+        Point-in-time optimization: vintage date partitions contain immutable
+        data (FRED never revises a historical vintage snapshot).  When a
+        partition already has a bookmark from a previous sync we skip the API
+        call entirely — the Singer SDK preserves the existing bookmark even
+        when zero records are yielded.
+        """
         if context is None or self._resource_id_key not in context:
             yield from super().get_records(context)
-        else:
-            resource_id = context[self._resource_id_key]
-            yield from self._safe_partition_extraction(
-                self._get_resource_records(resource_id, context),
-                resource_id,
-                self._resource_id_key
-            )
+            return
+
+        # Skip already-synced vintage partitions (immutable data)
+        # SAFETY: In PIT mode, all records share the same realtime_start
+        # (= vintage_date), so partial extraction still sets bookmark =
+        # vintage_date. If extraction fails BEFORE any records are emitted,
+        # no bookmark exists and the partition retries on next run.
+        # IMPORTANT: Check state["replication_key_value"] directly, NOT
+        # get_starting_replication_key_value() which falls back to start_date
+        # config and would incorrectly skip all new partitions.
+        if context.get("vintage_date"):
+            state = self.get_context_state(context)
+            bookmark = state.get("replication_key_value")
+            if bookmark is not None:
+                self.logger.debug(
+                    f"Skipping completed partition {self._resource_id_key}="
+                    f"{context[self._resource_id_key]}, vintage_date="
+                    f"{context['vintage_date']} (bookmark={bookmark})"
+                )
+                return
+
+        resource_id = context[self._resource_id_key]
+        yield from self._safe_partition_extraction(
+            self._get_resource_records(resource_id, context),
+            resource_id,
+            self._resource_id_key
+        )

@@ -164,100 +164,28 @@ plugins:
     config:
       api_key: ${FRED_API_KEY}
       api_url: https://api.stlouisfed.org/fred
-      start_date: '2015-01-01'             # Historical data from 2015 for production testing
+      start_date: '2025-01-01'             # Recent obs only for incremental testing
       max_requests_per_minute: 60
       min_throttle_seconds: 1.0
 
-      series_ids: ["GDP", "UNRATE"]
-      category_ids: ["18", "32992"]
-      release_ids: ["53", "151"]
-      source_ids: ["1"]
-      tag_names: ["gdp"]
+      series_ids: ["GDP", "DGS10"]
+      # category_ids: ["18", "32992"]
+      # release_ids: ["53", "151"]
+      # source_ids: ["1"]
+      # tag_names: ["gdp"]
 
-      # FRED/ALFRED mode configuration
-      data_mode: "FRED"
-      # realtime_start: "2020-01-01"    # Uncomment for ALFRED mode
-      # realtime_end: "2020-12-31"      # Uncomment for ALFRED mode
-
-      # Point-in-Time mode (uncomment for backtesting)
-      point_in_time_mode: false
-      # point_in_time_start: "2020-01-01"
-      # point_in_time_end: "2020-06-30"
-
-      # GeoFRED Maps Configuration
-      geofred_regional_params:
-        - series_group: "882"
-          region_type: "state"
-          season: "NSA"
-          date: "2013-01-01"
-          units: "Dollars"
-          frequency: "a"
-      geofred_series_ids: ["CAHOWN", "TXHOWN"]
-
-      # Search Stream Parameters (enabled for testing)
-      series_search_params:
-        query_params:
-          search_text: "GDP"
-      series_search_tags_params:
-        query_params:
-          series_search_text: "GDP"
-      series_search_related_tags_params:
-        query_params:
-          series_search_text: "GDP"
-          tag_names: ["gdp", "usa"]
+      # ALFRED point-in-time mode for incremental replication testing
+      data_mode: "ALFRED"
+      point_in_time_mode: true
+      point_in_time_start: "2025-01-01"
+      point_in_time_end: "2025-01-10"
 
       default_params:
         query_params:
           limit: 1000
     select:
-      # All FRED API streams selected for comprehensive data extraction
-      # ALFRED mode preserves vintage dates for historical data accuracy
-
-      # Core economic time series data
-    - series_observations.*         # Time series data with vintage dates
-    - series_vintage_dates.*        # Complete revision history per series
-
-      # Series metadata and relationships  
-    - series.*                      # Series definitions and metadata
-    - series_categories.*           # Series-to-category relationships
-    - series_release.*              # Series-to-release mapping
-    - series_search.*               # Series discovery via search
-    - series_search_tags.*          # Search-based tag relationships
-    - series_search_related_tags.*  # Related tags for search expansion
-    - series_tags.*                 # Series tagging for categorization
-    - series_updates.*              # Series update tracking
-
-      # Category hierarchy and taxonomy
-    - categories.*                  # Main category definitions
-    - category_children.*           # Parent-child category relationships
-    - category_related.*            # Related category discovery
-    - category_series.*             # Category-to-series mappings
-    - category_tags.*               # Category tagging system
-    - category_related_tags.*       # Related tags per category
-
-      # Release publications and schedules
-    - releases.*                    # Publication release definitions
-    - release.*                     # Individual release details
-    - release_dates.*               # Release publication dates
-    - release_series.*              # Release-to-series mappings
-    - release_sources.*             # Release data sources
-    - release_tags.*                # Release tagging
-    - release_related_tags.*        # Related tags per release
-    - release_tables.*              # Release table structures
-
-      # Data sources and institutional metadata
-    - sources.*                     # Data source definitions (BLS, BEA, etc.)
-    - source.*                      # Individual source details
-    - source_releases.*             # Source-to-release relationships
-
-      # Topic/keyword taxonomy system
-    - tags.*                        # Tag definitions and metadata
-    - related_tags.*                # Tag relationship discovery
-    - tags_series.*                 # Tag-to-series mappings
-
-      # Geographic and regional data
-    - geofred_regional_data.*       # Regional economic indicators
-    - geofred_series_data.*         # Geographic series data
+    - series_observations.*
+    - series_vintage_dates.*
 
   loaders:
   - name: target-jsonl

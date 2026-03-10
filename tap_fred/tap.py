@@ -191,6 +191,44 @@ class TapFRED(Tap):
         self._shared_request_timestamps: deque = deque()
         self._shared_throttle_lock = Lock()
         super().__init__(*args, **kwargs)
+        self._validate_tap_config()
+
+    def _validate_tap_config(self) -> None:
+        """Validate config at startup to catch misconfigurations early."""
+        # Fix 6a: Normalize string series_ids to list to prevent char-by-char iteration
+        series_ids = self.config.get("series_ids")
+        if isinstance(series_ids, str):
+            self._config["series_ids"] = [series_ids]
+
+        if isinstance(series_ids, list) and len(series_ids) == 0:
+            raise ValueError(
+                "series_ids is an empty list. Provide at least one series ID "
+                "or use ['*'] for wildcard discovery."
+            )
+
+        pit_start = self.config.get("point_in_time_start")
+        pit_end = self.config.get("point_in_time_end")
+        if pit_start and pit_end and str(pit_start)[:10] > str(pit_end)[:10]:
+            raise ValueError(
+                f"point_in_time_start ({pit_start}) is after "
+                f"point_in_time_end ({pit_end}). This produces zero partitions."
+            )
+
+        realtime_start = self.config.get("realtime_start")
+        realtime_end = self.config.get("realtime_end")
+        if realtime_start and realtime_end and str(realtime_start)[:10] > str(realtime_end)[:10]:
+            raise ValueError(
+                f"realtime_start ({realtime_start}) is after "
+                f"realtime_end ({realtime_end})."
+            )
+
+        data_mode = self.config.get("data_mode", "FRED")
+        pit_mode = self.config.get("point_in_time_mode", False)
+        if data_mode == "ALFRED" and not realtime_start and not pit_mode:
+            self.logger.warning(
+                "data_mode=ALFRED without realtime_start and point_in_time_mode=false. "
+                "FRED API will default to today's date (equivalent to FRED mode)."
+            )
 
     def get_cached_series_ids(self):
         """Return cached series IDs in consistent format [{'series_id': str}]."""
@@ -282,6 +320,9 @@ class TapFRED(Tap):
                 cached_data = getattr(self, cache_attr)
                 if cached_data is None:
                     config_ids = self.config.get(config_key, ["*"])
+                    # Belt-and-suspenders: normalize string to list
+                    if isinstance(config_ids, str):
+                        config_ids = [config_ids]
 
                     if config_ids == ["*"]:
                         # Wildcard: use discovery stream

@@ -303,3 +303,13 @@ class ReleaseTablesStream(ReleaseBasedFREDStream):
 
     def _get_records_key(self) -> str:
         return "elements"
+
+    def post_process(self, row: dict, context=None) -> dict:
+        """Validate element_id is present — it's the primary key."""
+        if row.get("element_id") is None:
+            self.logger.warning(
+                f"ReleaseTablesStream: record missing element_id (PK). "
+                f"release_id={context.get('release_id') if context else 'unknown'}, "
+                f"record keys={list(row.keys())}. Record will likely fail on insert."
+            )
+        return super().post_process(row, context)

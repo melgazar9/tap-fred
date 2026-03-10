@@ -1,24 +1,26 @@
 # tap-fred
 
-Production-ready Meltano extractor for the Federal Reserve Economic Data (FRED) API with ALFRED vintage data support for institutional-grade backtesting.
+Meltano Singer tap for the Federal Reserve Economic Data (FRED) API with ALFRED vintage data support for backtesting.
 
 Built with the [Meltano Tap SDK](https://sdk.meltano.com) for Singer Taps.
 
 ## Features
 
+- **32 FRED API endpoints** across 6 domain categories (series, categories, releases, sources, tags, GeoFRED)
 - **FRED Mode**: Current revised economic data for analysis and reporting
 - **ALFRED Mode**: Historical vintage data for backtesting without look-ahead bias
-- **319+ Economic Releases**: All major indicators from BEA, BLS, Census, Fed, and more
-- **Incremental Loading**: State management with configurable replication keys
-- **Production Ready**: Rate limiting, retry logic, error handling, and API key security
-- **Wildcard Support**: Extract all series IDs with `series_ids: "*"`
+- **Point-in-Time Mode**: Per-vintage-date partitions with data leakage prevention
+- **Incremental Loading**: State management with partition-aware bookmarking
+- **Wildcard Discovery**: Extract all resources with `["*"]` configuration
+- **Rate Limiting**: Sliding window throttling with exponential backoff retry
+- **Error Handling**: Configurable strict/permissive modes with partition-level skip tracking
 
 ## Quick Start
 
 ### 1. Get FRED API Key
 Register at https://fred.stlouisfed.org/docs/api/api_key.html
 
-### 2. Install Meltano
+### 2. Install
 ```bash
 pipx install meltano
 cd your-project
@@ -32,46 +34,64 @@ extractors:
 - name: tap-fred
   config:
     api_key: ${FRED_API_KEY}
-    series_ids: ["GDP", "UNRATE"]  # Or "*" for all series
-    data_mode: "FRED"  # Use "ALFRED" for vintage data
+    series_ids: ["GDP", "UNRATE"]
 ```
 
-### 4. Run Extraction
+### 4. Run
 ```bash
-# Set API key
 export FRED_API_KEY=your_api_key_here
-
-# Extract current data
-meltano el tap-fred target-jsonl --select series_observations
-
-# Extract vintage data (backtesting mode)
-meltano config tap-fred set data_mode ALFRED
-meltano config tap-fred set realtime_start 2020-06-01
-meltano config tap-fred set realtime_end 2020-06-01
-meltano el tap-fred target-jsonl --select series_observations
+meltano el --state-id my-job tap-fred target-jsonl --select series_observations
 ```
+
+**Important**: Always use `--state-id` for proper incremental replication.
 
 ## Configuration
 
 ### Core Settings
 
-| Setting | Type | Required | Description |
-|---------|------|----------|-------------|
-| `api_key` | string | ✅ | FRED API key |
-| `series_ids` | array/string | ✅ | Series IDs to extract (or "*" for all) |
-| `data_mode` | string | | "FRED" (default) or "ALFRED" |
-| `start_date` | date | | Earliest observation date |
-| `api_url` | string | | FRED API base URL |
-| `min_throttle_seconds` | float | | Rate limiting (default: 0.01) |
+| Setting | Type | Required | Default | Description |
+|---------|------|----------|---------|-------------|
+| `api_key` | string | Yes | | FRED API key |
+| `series_ids` | array/string | Yes | | Series IDs to extract (`["GDP", "UNRATE"]` or `["*"]`) |
+| `start_date` | date | No | | Earliest observation date |
+| `api_url` | string | No | `https://api.stlouisfed.org/fred` | FRED API base URL |
+| `max_requests_per_minute` | integer | No | `60` | Rate limit (FRED allows up to 120) |
+| `min_throttle_seconds` | float | No | `1.0` | Min seconds between requests |
+| `strict_mode` | boolean | No | `false` | If true, fail on any non-retriable error; if false, skip and log |
 
-### ALFRED Mode (Vintage Data)
+### ALFRED / Vintage Mode
 
 | Setting | Type | Description |
 |---------|------|-------------|
-| `realtime_start` | date | Data as it existed on this date |
-| `realtime_end` | date | End of vintage period (use same as start for point-in-time) |
+| `data_mode` | string | `"FRED"` (default) or `"ALFRED"` |
+| `realtime_start` | date | Vintage start date (YYYY-MM-DD) |
+| `realtime_end` | date | Vintage end date (YYYY-MM-DD) |
 
-## FRED vs ALFRED Modes
+### Point-in-Time Mode
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `point_in_time_mode` | boolean | `false` | Create per-vintage-date partitions |
+| `point_in_time_start` | date | | Filter vintage dates from this date |
+| `point_in_time_end` | date | | Filter vintage dates up to this date |
+
+### Resource Selection
+
+| Setting | Type | Description |
+|---------|------|-------------|
+| `category_ids` | array | Category IDs (`["18", "32992"]` or `["*"]`) |
+| `release_ids` | array | Release IDs (`["53", "151"]` or `["*"]`) |
+| `source_ids` | array | Source IDs (`["1", "3"]` or `["*"]`) |
+| `tag_names` | array | Tag names (`["gdp", "inflation"]` or `["*"]`) |
+
+### GeoFRED Configuration
+
+| Setting | Type | Description |
+|---------|------|-------------|
+| `geofred_regional_params` | array | Parameter sets for regional data extraction |
+| `geofred_series_ids` | array | GeoFRED series IDs to extract |
+
+## Data Modes
 
 ### FRED Mode (Default)
 ```yaml
@@ -79,68 +99,143 @@ config:
   data_mode: "FRED"
   series_ids: ["GDP", "UNRATE"]
 ```
-- **Use for**: Current analysis, reporting, research
-- **Data**: Current revised values - "what we know now about the past"
-- **Output**: Latest economic data with all historical revisions
+Returns current revised data — "what we know now about the past."
 
-### ALFRED Mode (Backtesting)
+### ALFRED Mode
 ```yaml
 config:
   data_mode: "ALFRED"
-  series_ids: ["GDP", "UNRATE"] 
+  series_ids: ["GDP", "UNRATE"]
   realtime_start: "2020-06-01"
   realtime_end: "2020-06-01"
 ```
-- **Use for**: Backtesting, trading algorithms, machine learning models
-- **Data**: Vintage historical data - "what we knew then"
-- **Output**: Only data available on the specified date
-- **Prevents**: Look-ahead bias in backtesting
+Returns vintage data as it existed on the specified date — "what we knew then." Prevents look-ahead bias in backtesting.
 
-### Example Output Comparison
-
-**FRED Mode (Current Revised Data):**
-```json
-{"realtime_start": "2025-08-27", "realtime_end": "2025-08-27", "date": "2020-01-01", "value": 21727.657, "series_id": "GDP"}
+### Point-in-Time Mode
+```yaml
+config:
+  data_mode: "ALFRED"
+  series_ids: ["GDP", "DGS10"]
+  point_in_time_mode: true
+  point_in_time_start: "2020-01-01"
+  point_in_time_end: "2020-03-31"
+  strict_mode: true
 ```
+Creates separate partitions for each vintage date within the range. Each partition captures the complete observation history as known on that specific vintage date.
 
-**ALFRED Mode (Vintage Data):**
-```json
-{"realtime_start": "2020-06-01", "realtime_end": "2020-06-01", "date": "2020-01-01", "value": 21534.907, "series_id": "GDP"}
-```
-
-## Data Reliability for Backtesting
-
-### ✅ Verified: No Intraday Updates
-
-FRED/ALFRED data follows predetermined government release schedules and does NOT update intraday:
-
-**Major Release Times:**
-- **BEA** (GDP, Personal Income): 8:30 AM ET
-- **BLS** (Unemployment, CPI): 8:30 AM ET  
-- **Fed** (Interest Rates): 3:15 PM CT
-
-**Backtesting Guarantee:**
-A vintage record with `realtime_start: "2020-06-01"` represents exactly what was known on June 1, 2020 - whether you traded at 9 AM, 3 PM, or 11:59 PM that day.
-
-### Data Sources (319 Releases)
-- **Federal Agencies**: BEA, BLS, Census Bureau, Treasury, Federal Reserve
-- **Regional Fed Banks**: Chicago Fed, NY Fed, Atlanta Fed, etc.
-- **Private Sources**: ADP, Conference Board, and more
+**Data leakage prevention**: If a series has no vintage dates in the requested range, it is skipped entirely — the tap will never fall back to current revised data in PIT mode. A runtime guard also verifies that every returned record's `realtime_start` matches the requested `vintage_date`.
 
 ## Available Streams
 
-Currently supported stream (more can be added following existing patterns):
+### Series Streams
 
-### series_observations
-- **Description**: Economic data points for specified series
-- **Primary Keys**: `["series_id", "date"]`
-- **Replication Key**: `date` (incremental loading)
-- **Schema**: 
-  - `series_id` (string): FRED series identifier
-  - `date` (date): Observation date
-  - `value` (number): Economic data value
-  - `realtime_start` (date): Vintage start date
-  - `realtime_end` (date): Vintage end date
+| Stream | Endpoint | PK | Replication Key |
+|--------|----------|------|-----------------|
+| `series_observations` | `/fred/series/observations` | `series_id, date, realtime_start, realtime_end` | `realtime_start` |
+| `series` | `/fred/series` | `id` | — |
+| `series_categories` | `/fred/series/categories` | `id` | — |
+| `series_release` | `/fred/series/release` | `id` | — |
+| `series_search` | `/fred/series/search` | `id` | — |
+| `series_search_tags` | `/fred/series/search/tags` | `name` | — |
+| `series_search_related_tags` | `/fred/series/search/related_tags` | `name` | — |
+| `series_tags` | `/fred/series/tags` | `name` | — |
+| `series_updates` | `/fred/series/updates` | `id` | `last_updated` |
+| `series_vintage_dates` | `/fred/series/vintagedates` | `series_id, date` | `date` |
+
+### Category Streams
+
+| Stream | Endpoint | PK |
+|--------|----------|----|
+| `categories` | `/fred/category` | `id` |
+| `category_children` | `/fred/category/children` | `id, parent_id` |
+| `category_related` | `/fred/category/related` | `id` |
+| `category_series` | `/fred/category/series` | `id` |
+| `category_tags` | `/fred/category/tags` | `name` |
+| `category_related_tags` | `/fred/category/related_tags` | `name` |
+
+### Release Streams
+
+| Stream | Endpoint | PK |
+|--------|----------|----|
+| `releases` | `/fred/releases` | `id` |
+| `release` | `/fred/release` | `id` |
+| `release_dates` | `/fred/release/dates` | `release_id, date` |
+| `release_series` | `/fred/release/series` | `id` |
+| `release_sources` | `/fred/release/sources` | `id` |
+| `release_tags` | `/fred/release/tags` | `name` |
+| `release_related_tags` | `/fred/release/related_tags` | `name` |
+| `release_tables` | `/fred/release/tables` | `element_id` |
+
+### Source Streams
+
+| Stream | Endpoint | PK |
+|--------|----------|----|
+| `sources` | `/fred/sources` | `id` |
+| `source` | `/fred/source` | `id` |
+| `source_releases` | `/fred/source/releases` | `id` |
+
+### Tag Streams
+
+| Stream | Endpoint | PK |
+|--------|----------|----|
+| `tags` | `/fred/tags` | `name` |
+| `related_tags` | `/fred/related_tags` | `name` |
+| `tags_series` | `/fred/tags/series` | `id` |
+
+### GeoFRED Streams
+
+| Stream | Endpoint | PK |
+|--------|----------|----|
+| `geofred_regional_data` | `/geofred/regional/data` | `region, series_group, date, region_type` |
+| `geofred_series_data` | `/geofred/series/data` | `region, series_id, date` |
+
+### Conditional Stream Registration
+
+Some streams require specific configuration to be registered:
+
+- **`tag_names` required**: `category_related_tags`, `related_tags`, `release_related_tags`, `tags_series`
+- **`series_search_related_tags_params` with both `series_search_text` and `tag_names`**: `series_search_related_tags`
+- **`geofred_regional_params`**: `geofred_regional_data`
+- **`geofred_series_ids`**: `geofred_series_data`
+
+## Migration Notes
+
+### PK Change for series_observations
+
+`primary_keys` changed from `["series_id", "date"]` to `["series_id", "date", "realtime_start", "realtime_end"]`. This prevents vintage data from being overwritten during point-in-time backfills. Downstream targets doing upsert-by-PK will need to account for this wider key.
+
+## Operations
+
+### Strict vs Permissive Mode
+
+- **`strict_mode: false`** (default): Non-retriable API errors (4xx) are logged and the partition is skipped. A skip summary is emitted after each stream completes.
+- **`strict_mode: true`**: Any non-retriable error fails the entire sync. Recommended for production to catch unexpected API changes.
+
+RuntimeError (data leakage guards) always propagates regardless of strict_mode.
+
+### Rate Limiting
+
+The tap uses a sliding window rate limiter shared across all streams. Default: 60 requests/minute with 1.0s minimum between requests. FRED allows up to 120/min but conservative defaults reduce 429 risk.
+
+### Retry Logic
+
+Automatic exponential backoff (5s–300s) with jitter on retriable errors: 429 (rate limit), 500, 502, 503, 504.
+
+### Chunked Backfills
+
+For large wildcard backfills (`series_ids: ["*"]`), use narrow `point_in_time_start`/`point_in_time_end` windows with separate `--state-id` values per chunk. This keeps individual runs manageable and allows resuming from failures.
+
+### Restart Behavior
+
+- State commits only after successful pipeline completion (Singer SDK guarantee).
+- If the process is killed mid-sync, the next run re-processes from the last committed bookmark — no data loss, but some records may be re-emitted.
+- Point-in-time partitions with existing bookmarks are skipped entirely (no API call), making re-runs efficient.
+
+### Post-Run Checks
+
+1. Check for skip summary warnings in logs (partitions that returned errors).
+2. Verify record counts against expectations for high-volume streams.
+3. For PIT mode: confirm `realtime_start` values in output match requested vintage dates.
 
 ## Development
 
@@ -150,67 +245,21 @@ Currently supported stream (more can be added following existing patterns):
 
 ### Setup
 ```bash
-# Clone and install
 git clone <repo-url>
 cd tap-fred
 uv sync
-
-# Test
 uv run pytest
-
-# Run directly
 uv run tap-fred --help
 ```
 
-### Testing with Meltano
+### Testing
 ```bash
-# Install Meltano and plugins
-pipx install meltano
-cd tap-fred
-meltano install
-
-# Test discovery
-meltano invoke tap-fred --discover
-
-# Run extraction
-meltano el tap-fred target-jsonl --select series_observations
+uv run pytest                              # All tests
+uv run pytest tests/test_integration.py    # Integration tests (mocked API)
+uv run pytest tests/test_comprehensive.py  # Config/schema tests
+uv run pytest -k point_in_time            # Pattern matching
 ```
-
-## Production Deployment
-
-### Environment Variables
-```bash
-export FRED_API_KEY=your_api_key_here
-```
-
-### Rate Limiting
-```yaml
-config:
-  min_throttle_seconds: 1.0  # 60 requests/minute (under 120/min FRED limit)
-```
-
-### Incremental Loading
-The extractor automatically manages state for incremental loading:
-- Uses `date` as replication key
-- Tracks last extracted date per series
-- Resumes from last extraction point
-
-### Error Handling
-- Exponential backoff with jitter
-- Retry on 429, 500, 502, 503, 504 errors
-- API key redaction in logs
-- Thread-safe series caching
 
 ## License
 
 [Your License Here]
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make changes following existing patterns
-4. Add tests
-5. Submit a pull request
-
-For more details, see `.claude/CLAUDE.md` for complete technical documentation.

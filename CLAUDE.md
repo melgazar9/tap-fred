@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 DO NOT assume this code is production ready. Previous AI sessions repeatedly declared "production ready" while real bugs existed. Be brutally honest about code quality. Verify every claim against the FRED API documentation at https://fred.stlouisfed.org/docs/api/fred/.
 
+**NEVER run git commands.** No git status, git log, git diff, git remote, git branch, git push, git commit, or ANY git command whatsoever. The user manages git themselves.
+
 ## What This Is
 
 A Meltano Singer tap for the Federal Reserve Economic Data (FRED) API. Extracts economic time series data with support for ALFRED (vintage/historical) mode for backtesting without look-ahead bias. Built with the [Meltano Singer SDK](https://sdk.meltano.com).

@@ -176,9 +176,17 @@ class GeoFREDRegionalDataStream(FREDStream):
         if isinstance(data, dict):
             for date_str, region_records in data.items():
                 if not isinstance(region_records, list):
+                    self.logger.warning(
+                        f"Unexpected type for region_records at date {date_str}: "
+                        f"{type(region_records).__name__}. Skipping."
+                    )
                     continue
                 for record in region_records:
                     if not isinstance(record, dict):
+                        self.logger.warning(
+                            f"Unexpected record type at date {date_str}: "
+                            f"{type(record).__name__}. Skipping."
+                        )
                         continue
                     # Enrich record with partition parameters and date
                     record.update(
@@ -318,9 +326,17 @@ class GeoFREDSeriesDataStream(FREDStream):
         if isinstance(data, dict):
             for date_str, region_records in data.items():
                 if not isinstance(region_records, list):
+                    self.logger.warning(
+                        f"Unexpected type for region_records at date {date_str}: "
+                        f"{type(region_records).__name__}. Skipping."
+                    )
                     continue
                 for record in region_records:
                     if not isinstance(record, dict):
+                        self.logger.warning(
+                            f"Unexpected record type at date {date_str}: "
+                            f"{type(record).__name__}. Skipping."
+                        )
                         continue
                     record.update(
                         {
