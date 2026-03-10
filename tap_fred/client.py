@@ -405,7 +405,8 @@ class FREDStream(RESTStream, ABC):
         # Add realtime parameters based on data_mode
         self._add_realtime_params()
 
-    def _format_date(self, date_value) -> str:
+    @staticmethod
+    def _format_date(date_value) -> str:
         """Format date parameter consistently."""
         if hasattr(date_value, "strftime"):
             return date_value.strftime("%Y-%m-%d")
@@ -620,17 +621,16 @@ class TreeTraversalFREDStream(FREDStream):
             )
             return [0]
 
-    def _get_node_params(self, node_id) -> dict:
+    @staticmethod
+    def _get_node_params(node_id) -> dict:
         """Override to specify URL parameters for accessing a node."""
         return {"category_id": node_id}
 
-    def _get_child_id(self, record: dict):
+    @staticmethod
+    def _get_child_id(record: dict):
         """Override to extract child ID from a record for further traversal."""
         return record.get("id")
 
-    def _get_records_key(self) -> str:
-        """Override to specify the JSON key containing records."""
-        return "categories"
 
 
 class SeriesBasedFREDStream(FREDStream):

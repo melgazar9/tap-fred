@@ -1,0 +1,313 @@
+version: 1
+send_anonymous_usage_stats: false
+project_id: tap-fred
+default_environment: prod
+venv:
+  backend: uv
+environments:
+- name: dev
+- name: prod
+plugins:
+  extractors:
+  - name: tap-fred
+    namespace: tap_fred
+    pip_url: -e .
+    capabilities:
+    - state
+    - catalog
+    - discover
+    - about
+    - stream-maps
+
+    settings_group_validation:
+    - [api_key]
+
+    settings:
+    - name: api_key
+      kind: string
+      label: FRED API Key
+      description: Your FRED API key from
+        https://fred.stlouisfed.org/docs/api/api_key.html
+      sensitive: true
+
+    - name: series_ids
+      label: Series IDs
+      description: FRED series IDs to extract
+
+    - name: start_date
+      kind: date_iso8601
+      label: Start Date
+      description: Earliest observation date to extract
+
+    - name: api_url
+      label: API Base URL
+      description: FRED API base URL
+
+    - name: user_agent
+      label: User Agent
+      description: Custom User-Agent header for requests
+
+    - name: max_requests_per_minute
+      label: Max Requests Per Minute
+      description: Maximum API requests per minute (FRED allows up to 120)
+      default: 60
+
+    - name: min_throttle_seconds
+      label: Minimum Throttle Seconds
+      description: Minimum seconds between consecutive API requests
+      default: 1.0
+
+    - name: default_params
+      kind: object
+      label: Default Parameters
+      description: Default query/path parameters for all streams
+
+    - name: series_observations_params
+      kind: object
+      label: Series Observations Parameters
+      description: Custom parameters for series_observations stream
+
+    - name: releases_params
+      kind: object
+      label: Releases Parameters
+      description: Custom parameters for releases stream
+
+    - name: data_mode
+      kind: options
+      label: Data Mode
+      description: FRED for current revised data, ALFRED for vintage historical data
+      options:
+      - label: FRED (Current Revised Data)
+        value: FRED
+      - label: ALFRED (Vintage Historical Data)
+        value: ALFRED
+      default: FRED
+
+    - name: realtime_start
+      kind: date_iso8601
+      label: Realtime Start Date
+      description: Global vintage date for regular ALFRED mode (YYYY-MM-DD)
+
+    - name: realtime_end
+      kind: date_iso8601
+      label: Realtime End Date
+      description: End vintage date for regular ALFRED mode (YYYY-MM-DD)
+
+    - name: point_in_time_mode
+      kind: boolean
+      label: Point-in-Time Mode
+      description: Enable individual vintage date partitions for backtesting
+      default: false
+
+    - name: point_in_time_start
+      kind: date_iso8601
+      label: Point-in-Time Start Date
+      description: Filter vintage dates from this date (YYYY-MM-DD)
+
+    - name: point_in_time_end
+      kind: date_iso8601
+      label: Point-in-Time End Date
+      description: Filter vintage dates up to this date (YYYY-MM-DD)
+
+    - name: category_ids
+      kind: array
+      label: Category IDs
+      description: Specific FRED category IDs to extract
+
+    - name: release_ids
+      kind: array
+      label: Release IDs
+      description: Specific FRED release IDs to extract
+
+    - name: source_ids
+      kind: array
+      label: Source IDs
+      description: Specific FRED source IDs to extract
+
+    - name: tag_names
+      kind: array
+      label: Tag Names
+      description: Specific FRED tag names to extract
+
+    - name: search_text
+      label: Search Text
+      description: Search term for series search streams
+
+    - name: geofred_regional_params
+      kind: array
+      label: GeoFRED Regional Parameters
+      description: Array of parameter sets for regional data extraction
+
+    - name: geofred_series_ids
+      kind: array
+      label: GeoFRED Series IDs
+      description: Specific GeoFRED series IDs to extract
+
+    config:
+      api_key: ${FRED_API_KEY}
+      api_url: https://api.stlouisfed.org/fred
+      start_date: '1776-01-01'
+      max_requests_per_minute: 120
+      min_throttle_seconds: 0.5
+
+      # ============================================================
+      # PHASE 1: Prioritized macro trading series (~113 series)
+      # Estimated: ~94K vintage partitions = ~13 hours at 120 req/min
+      # ============================================================
+      series_ids:
+        # --- Employment / Labor Market ---
+        - PAYEMS           # Total Nonfarm Payrolls
+        - UNRATE           # Unemployment Rate
+        - ICSA             # Initial Jobless Claims
+        - CCSA             # Continued Claims
+        - JTSJOL           # JOLTS Job Openings
+        - JTSHIR           # JOLTS Hires
+        - JTSQUR           # JOLTS Quits Rate
+        - CIVPART          # Labor Force Participation Rate
+        - U6RATE           # U-6 Underemployment Rate
+        - AWHAETP          # Avg Weekly Hours (Total Private)
+        - CES0500000003    # Avg Hourly Earnings (Total Private)
+        # --- Inflation / Prices ---
+        - CPIAUCSL         # CPI All Urban Consumers
+        - CPILFESL         # Core CPI (ex Food & Energy)
+        - PPIACO           # PPI All Commodities
+        - PCEPILFE         # Core PCE Price Index
+        - PCEPI            # PCE Price Index
+        - CPIENGSL         # CPI Energy
+        - CPIFABSL         # CPI Food & Beverages
+        - MICH             # Michigan Inflation Expectations
+        - T5YIE            # 5Y Breakeven Inflation
+        - T10YIE           # 10Y Breakeven Inflation
+        # --- GDP / Output ---
+        - GDP              # Nominal GDP
+        - GDPC1            # Real GDP
+        - A191RL1Q225SBEA  # Real GDP Growth Rate
+        - GDI              # Gross Domestic Income
+        - GDPDEF           # GDP Deflator
+        # --- Interest Rates / Fed / Monetary ---
+        - FEDFUNDS         # Effective Federal Funds Rate
+        - DFEDTARU         # Fed Funds Upper Target
+        - DFEDTARL         # Fed Funds Lower Target
+        - DGS1             # 1Y Treasury Yield
+        - DGS2             # 2Y Treasury Yield
+        - DGS5             # 5Y Treasury Yield
+        - DGS10            # 10Y Treasury Yield
+        - DGS30            # 30Y Treasury Yield
+        - T10Y2Y           # 10Y-2Y Yield Curve Spread
+        - T10Y3M           # 10Y-3M Yield Curve Spread
+        - WALCL            # Fed Balance Sheet Total Assets
+        - RRPONTSYD        # Overnight Reverse Repo
+        - M2SL             # M2 Money Supply
+        - M1SL             # M1 Money Supply
+        - BOGMBASE         # Monetary Base
+        # --- Housing ---
+        - HOUST            # Housing Starts
+        - PERMIT           # Building Permits
+        - HSN1F            # New Home Sales
+        - CSUSHPISA        # Case-Shiller Home Price Index
+        - MORTGAGE30US     # 30Y Mortgage Rate
+        - MORTGAGE15US     # 15Y Mortgage Rate
+        # --- Consumer / Retail ---
+        - RSAFS            # Advance Retail Sales
+        - UMCSENT          # Michigan Consumer Sentiment
+        - PCE              # Personal Consumption Expenditures
+        - PI               # Personal Income
+        - PSAVERT          # Personal Savings Rate
+        - DSPIC96          # Real Disposable Personal Income
+        # --- Manufacturing / Industry ---
+        - INDPRO           # Industrial Production
+        - TCU              # Capacity Utilization
+        - DGORDER          # Durable Goods Orders
+        - NEWORDER         # New Orders: Nondefense Capital Goods
+        - AMTMNO           # Factory Orders
+        - IPMAN            # Manufacturing Production
+        # --- Trade ---
+        - BOPGSTB          # Trade Balance
+        - IMPGS            # Imports of Goods & Services
+        - EXPGS            # Exports of Goods & Services
+        - DTWEXBGS         # Trade Weighted Dollar Index
+        # --- FX Rates ---
+        - DEXUSEU          # USD/EUR
+        - DEXJPUS          # JPY/USD
+        - DEXUSUK          # USD/GBP
+        - DEXCAUS          # CAD/USD
+        - DEXUSAL          # USD/AUD
+        - DEXSZUS          # CHF/USD
+        - DEXCHUS          # CNY/USD
+        # --- Energy ---
+        - DCOILWTICO       # WTI Crude Oil
+        - DCOILBRENTEU     # Brent Crude Oil
+        - DHHNGSP          # Henry Hub Natural Gas
+        - GASREGW          # Regular Gas Price
+        # --- Credit / Financial Conditions ---
+        - BAMLH0A0HYM2     # High Yield OAS Spread
+        - BAMLC0A4CBBB     # BBB Corporate OAS Spread
+        - TEDRATE          # TED Spread
+        - DRTSCILM         # Bank Lending Standards
+        - TOTCI            # Commercial & Industrial Loans
+        - NFCI             # Chicago Fed Financial Conditions
+        # --- Leading Indicators ---
+        - USSLIND          # Leading Economic Index
+        - CFNAI            # Chicago Fed National Activity
+        - SAHMREALTIME     # Sahm Rule Recession Indicator
+        - USREC            # NBER Recession Indicator
+        - STLFSI2          # St Louis Financial Stress Index
+        # --- Government / Fiscal ---
+        - FYFSD            # Federal Surplus/Deficit
+        - GFDEBTN          # Federal Debt Total
+        - FDHBFIN          # Federal Debt Held by Foreign Investors
+        # --- International: Central Bank / Discount Rates ---
+        - INTDSRJPM193N    # Japan Discount Rate (BOJ)
+        - IRSTCI01JPM156N  # Japan Short-term Call Rate
+        - INTDSREZM193N    # ECB Discount Rate
+        - INTDSRGBM193N    # UK Bank Rate (BOE)
+        - INTDSRCAM193N    # Canada Rate (BOC)
+        - INTDSRAUM193N    # Australia Rate (RBA)
+        # --- International: Bond Yields ---
+        - IRLTLT01JPM156N  # Japan 10Y Bond
+        - IRLTLT01DEM156N  # Germany 10Y Bund
+        - IRLTLT01GBM156N  # UK 10Y Gilt
+        - IRLTLT01AUM156N  # Australia 10Y Bond
+        - IRLTLT01CAM156N  # Canada 10Y Bond
+        # --- International: GDP ---
+        - CLVMNACSCAB1GQEA19  # Euro Area Real GDP
+        - JPNRGDPEXP          # Japan Real GDP
+        - NAEXKP01CAQ189S     # Canada Real GDP
+        # --- International: CPI ---
+        - CP0000EZ19M086NEST  # Euro Area HICP
+        - JPNCPIALLMINMEI     # Japan CPI
+        - GBRCPIALLMINMEI     # UK CPI
+        - DEUCPIALLMINMEI     # Germany CPI
+        - AUSCPIALLQINMEI     # Australia CPI
+        # --- International: Unemployment ---
+        - LRHUTTTTJPM156S     # Japan Unemployment
+        - LRHUTTTTGBM156S     # UK Unemployment
+        - LRHUTTTTEZM156S     # Euro Area Unemployment
+        - LRHUTTTTDEM156S     # Germany Unemployment
+        - LRHUTTTTAUM156S     # Australia Unemployment
+        - LRHUTTTTCAM156S     # Canada Unemployment
+
+      # ============================================================
+      # PHASE 2: When Phase 1 completes, swap to wildcard:
+      #   series_ids: ["*"]
+      # Use the SAME state-id — already-synced partitions are skipped.
+      # Estimated: 4-12 months for the full ALFRED database.
+      # ============================================================
+
+      data_mode: "ALFRED"
+      point_in_time_mode: true
+      point_in_time_start: "1776-01-01"
+      point_in_time_end: "2099-12-31"
+
+      default_params:
+        query_params:
+          limit: 1000
+
+    select:
+    - series_observations.*
+    - series_vintage_dates.*
+
+  loaders:
+  - name: target-jsonl
+    variant: andyh1203
+    pip_url: target-jsonl
