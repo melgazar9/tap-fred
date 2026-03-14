@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import requests
-
 import typing as t
 from collections import deque
+
+import requests
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
-from tap_fred.client import FREDStream, CategoryBasedFREDStream
+
+from tap_fred.client import CategoryBasedFREDStream, FREDStream
 from tap_fred.helpers import join_tag_names
 
 

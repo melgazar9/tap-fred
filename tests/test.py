@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Comprehensive Test Script for tap-fred
+"""Comprehensive Test Script for tap-fred
 ======================================
 
 This script validates all 33 FRED API streams with the tap-fmp configuration pattern.
@@ -62,16 +61,16 @@ EXPECTED RESULTS:
 
 import argparse
 import json
+import logging
 import os
-import tempfile
-import time
+import re
 import subprocess
 import sys
-from typing import Dict, List, Any
-import logging
-import re
-from dataclasses import dataclass, field
+import tempfile
 import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List
 
 # Configure logging
 logging.basicConfig(
@@ -490,7 +489,7 @@ class FREDTestSuite:
         schema_errors = []
 
         try:
-            with open(output_file, "r") as f:
+            with open(output_file) as f:
                 for line_num, line in enumerate(f, 1):
                     if not line.strip():
                         continue

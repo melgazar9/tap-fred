@@ -5,50 +5,50 @@ from __future__ import annotations
 from collections import deque
 from threading import Lock
 
+import requests
 from singer_sdk import Tap
 from singer_sdk import typing as th
 
 from tap_fred.client import FREDStream
-
 from tap_fred.streams import (
-    # Series streams
-    SeriesStream,
-    SeriesObservationsStream,
-    SeriesCategoriesStream,
-    SeriesReleaseStream,
-    SeriesSearchStream,
-    SeriesSearchTagsStream,
-    SeriesSearchRelatedTagsStream,
-    SeriesTagsStream,
-    SeriesUpdatesStream,
-    SeriesVintageDatesStream,
-    # Category streams
-    CategoryStream,
     CategoryChildrenStream,
     CategoryRelatedStream,
-    CategorySeriesStream,
-    CategoryTagsStream,
     CategoryRelatedTagsStream,
-    # Release streams
-    ReleasesStream,
-    ReleaseStream,
-    ReleaseDatesStream,
-    ReleaseSeriesStream,
-    ReleaseSourcesStream,
-    ReleaseTagsStream,
-    ReleaseRelatedTagsStream,
-    ReleaseTablesStream,
-    # Source streams
-    SourcesStream,
-    SourceStream,
-    SourceReleasesStream,
-    # Tag streams
-    TagsStream,
-    RelatedTagsStream,
-    TagsSeriesStream,
+    CategorySeriesStream,
+    # Category streams
+    CategoryStream,
+    CategoryTagsStream,
     # Maps/GeoFRED streams
     GeoFREDRegionalDataStream,
     GeoFREDSeriesDataStream,
+    RelatedTagsStream,
+    ReleaseDatesStream,
+    ReleaseRelatedTagsStream,
+    ReleaseSeriesStream,
+    ReleaseSourcesStream,
+    # Release streams
+    ReleasesStream,
+    ReleaseStream,
+    ReleaseTablesStream,
+    ReleaseTagsStream,
+    SeriesCategoriesStream,
+    SeriesObservationsStream,
+    SeriesReleaseStream,
+    SeriesSearchRelatedTagsStream,
+    SeriesSearchStream,
+    SeriesSearchTagsStream,
+    # Series streams
+    SeriesStream,
+    SeriesTagsStream,
+    SeriesUpdatesStream,
+    SeriesVintageDatesStream,
+    SourceReleasesStream,
+    # Source streams
+    SourcesStream,
+    SourceStream,
+    TagsSeriesStream,
+    # Tag streams
+    TagsStream,
 )
 
 
@@ -216,7 +216,11 @@ class TapFRED(Tap):
 
         realtime_start = self.config.get("realtime_start")
         realtime_end = self.config.get("realtime_end")
-        if realtime_start and realtime_end and str(realtime_start)[:10] > str(realtime_end)[:10]:
+        if (
+            realtime_start
+            and realtime_end
+            and str(realtime_start)[:10] > str(realtime_end)[:10]
+        ):
             raise ValueError(
                 f"realtime_start ({realtime_start}) is after "
                 f"realtime_end ({realtime_end})."
@@ -238,49 +242,74 @@ class TapFRED(Tap):
         """Return cached vintage dates in consistent format [{'vintage_date': str}]."""
         return self._cache_resource_ids("vintage_date", SeriesVintageDatesStream(self))
 
-    def _discover_all_series_ids(self) -> list[str]:
-        """Discover all FRED series IDs by fetching from release series endpoints."""
-        series_ids = set()
+    _DISCOVERY_PAGE_LIMIT = 1000
 
-        # Get all release IDs first
-        cached_releases = self.get_cached_release_ids()
-        self.logger.info(f"Discovering series from {len(cached_releases)} releases...")
-
-        # For each release, get all its series (paginated per FRED docs: limit 1-1000)
-        stream = ReleaseSeriesStream(self)
-        for release_item in cached_releases:
-            release_id = release_item["release_id"]
+    def _collect_series_ids_from_resource(
+        self,
+        stream: FREDStream,
+        cached_items: list[dict],
+        resource_key: str,
+        label: str,
+        series_ids: set[str],
+    ) -> None:
+        """Paginate a resource-partitioned stream and collect series IDs into a set."""
+        self.logger.info(
+            f"Discovering series from {len(cached_items)} {label.lower()}s..."
+        )
+        url = stream.get_url()
+        for item in cached_items:
+            resource_id = item[resource_key]
             try:
-                url = stream.get_url()
                 offset = 0
-                limit = 1000
-                release_total = 0
+                total = 0
                 while True:
                     params = stream.query_params.copy()
-                    params["release_id"] = release_id
-                    params["limit"] = limit
+                    params[resource_key] = resource_id
+                    params["limit"] = self._DISCOVERY_PAGE_LIMIT
                     params["offset"] = offset
 
                     response_data = stream._fetch_with_retry(url, params)
-                    release_series = response_data.get("seriess", [])
-                    if not release_series:
+                    seriess = response_data.get("seriess", [])
+                    if not seriess:
                         break
-                    release_series_ids = [
-                        record["id"] for record in release_series if "id" in record
-                    ]
-                    series_ids.update(release_series_ids)
-                    release_total += len(release_series_ids)
-                    if len(release_series) < limit:
+                    series_ids.update(
+                        record["id"] for record in seriess if "id" in record
+                    )
+                    total += len(seriess)
+                    if len(seriess) < self._DISCOVERY_PAGE_LIMIT:
                         break
-                    offset += limit
-                self.logger.info(
-                    f"Release {release_id}: Found {release_total} series"
-                )
-            except Exception as e:
+                    offset += self._DISCOVERY_PAGE_LIMIT
+                self.logger.debug(f"{label} {resource_id}: Found {total} series")
+            except requests.exceptions.RequestException as e:
                 self.logger.warning(
-                    f"Failed to get series for release {release_id}: {e}"
+                    f"Failed to get series for {label.lower()} {resource_id}: {e}"
                 )
-                continue
+
+    def _discover_all_series_ids(self) -> list[str]:
+        """Discover all FRED series IDs via releases and categories for completeness."""
+        series_ids: set[str] = set()
+
+        self._collect_series_ids_from_resource(
+            stream=ReleaseSeriesStream(self),
+            cached_items=self.get_cached_release_ids(),
+            resource_key="release_id",
+            label="Release",
+            series_ids=series_ids,
+        )
+        release_count = len(series_ids)
+        self.logger.info(f"Release-based discovery: {release_count} unique series")
+
+        self._collect_series_ids_from_resource(
+            stream=CategorySeriesStream(self),
+            cached_items=self.get_cached_category_ids(),
+            resource_key="category_id",
+            label="Category",
+            series_ids=series_ids,
+        )
+        self.logger.info(
+            f"Category-based discovery: {len(series_ids) - release_count} "
+            f"additional series not found via releases"
+        )
 
         discovered_series = sorted(series_ids)
         self.logger.info(f"Total unique series discovered: {len(discovered_series)}")
@@ -288,8 +317,20 @@ class TapFRED(Tap):
 
     # Maps resource_type -> (cache_attr, lock_attr, config_key, id_key, data_key)
     _RESOURCE_ATTR_MAP = {
-        "tag_name": ("_cached_tag_names", "_tag_names_lock", "tag_names", "tag_name", "name"),
-        "vintage_date": ("_cached_vintage_dates", "_vintage_dates_lock", "vintage_dates", "vintage_date", "date"),
+        "tag_name": (
+            "_cached_tag_names",
+            "_tag_names_lock",
+            "tag_names",
+            "tag_name",
+            "name",
+        ),
+        "vintage_date": (
+            "_cached_vintage_dates",
+            "_vintage_dates_lock",
+            "vintage_dates",
+            "vintage_date",
+            "date",
+        ),
     }
 
     def _cache_resource_ids(self, resource_type: str, discovery_stream):
@@ -299,15 +340,17 @@ class TapFRED(Tap):
             resource_type: "category", "release", "source", "tag_name", "series", or "vintage_date"
             discovery_stream: Stream instance used for wildcard discovery
         """
-        cache_attr, lock_attr, config_key, id_key, data_key = self._RESOURCE_ATTR_MAP.get(
-            resource_type,
-            (
-                f"_cached_{resource_type}_ids",
-                f"_{resource_type}_ids_lock",
-                f"{resource_type}_ids",
-                f"{resource_type}_id",
-                "id",
-            ),
+        cache_attr, lock_attr, config_key, id_key, data_key = (
+            self._RESOURCE_ATTR_MAP.get(
+                resource_type,
+                (
+                    f"_cached_{resource_type}_ids",
+                    f"_{resource_type}_ids_lock",
+                    f"{resource_type}_ids",
+                    f"{resource_type}_id",
+                    "id",
+                ),
+            )
         )
 
         # Validate attributes exist
@@ -349,7 +392,9 @@ class TapFRED(Tap):
                             elif data_key == "date":  # For vintage dates using "date"
                                 # Preserve parent resource ID for per-resource vintage date filtering
                                 # Extract parent resource ID key from discovery stream (generic pattern)
-                                parent_id_key = getattr(discovery_stream, '_resource_id_key', None)
+                                parent_id_key = getattr(
+                                    discovery_stream, "_resource_id_key", None
+                                )
                                 if not parent_id_key:
                                     raise ValueError(
                                         f"Discovery stream for {resource_type} must define _resource_id_key "
@@ -359,7 +404,9 @@ class TapFRED(Tap):
                                 cached_data = [
                                     {
                                         id_key: item["date"],
-                                        "resource_id": item[parent_id_key]  # Generic "resource_id" field
+                                        "resource_id": item[
+                                            parent_id_key
+                                        ],  # Generic "resource_id" field
                                     }
                                     for item in data
                                 ]
@@ -433,17 +480,21 @@ class TapFRED(Tap):
         # Conditionally register SeriesSearchRelatedTagsStream behind its required params
         search_related_params = self.config.get("series_search_related_tags_params", {})
         search_related_qp = search_related_params.get("query_params", {})
-        if search_related_qp.get("series_search_text") and search_related_qp.get("tag_names"):
+        if search_related_qp.get("series_search_text") and search_related_qp.get(
+            "tag_names"
+        ):
             discovered_streams.append(SeriesSearchRelatedTagsStream(self))
 
         # Conditionally register streams that require tag_names config
         if self.config.get("tag_names"):
-            discovered_streams.extend([
-                CategoryRelatedTagsStream(self),
-                RelatedTagsStream(self),
-                ReleaseRelatedTagsStream(self),
-                TagsSeriesStream(self),
-            ])
+            discovered_streams.extend(
+                [
+                    CategoryRelatedTagsStream(self),
+                    RelatedTagsStream(self),
+                    ReleaseRelatedTagsStream(self),
+                    TagsSeriesStream(self),
+                ]
+            )
 
         # Conditionally register GeoFRED streams that require specific config
         if self.config.get("geofred_regional_params"):

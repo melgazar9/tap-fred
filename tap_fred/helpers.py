@@ -45,7 +45,9 @@ def join_tag_names(tag_names) -> str:
         return ";".join(tag_names)
     if isinstance(tag_names, str):
         return tag_names
-    raise ValueError(f"tag_names must be a list or string, got {type(tag_names).__name__}")
+    raise ValueError(
+        f"tag_names must be a list or string, got {type(tag_names).__name__}"
+    )
 
 
 def coerce_str_to_bool(value) -> bool:

@@ -7,7 +7,6 @@ Usage:
     FRED_API_KEY=... uv run python tests/reconciliation_check.py
 """
 
-import json
 import os
 import sys
 
@@ -47,17 +46,42 @@ def reconcile():
 
     checks = [
         # (stream_name, api_endpoint, extra_params, description)
-        ("releases", "/releases", {"order_by": "release_id", "sort_order": "asc"}, "All FRED releases"),
-        ("sources", "/sources", {"order_by": "source_id", "sort_order": "asc"}, "All FRED sources"),
+        (
+            "releases",
+            "/releases",
+            {"order_by": "release_id", "sort_order": "asc"},
+            "All FRED releases",
+        ),
+        (
+            "sources",
+            "/sources",
+            {"order_by": "source_id", "sort_order": "asc"},
+            "All FRED sources",
+        ),
         ("tags", "/tags", {"order_by": "name", "sort_order": "asc"}, "All FRED tags"),
         ("release_dates", "/releases/dates", None, "All release dates"),
         # series_search: FRED API has undocumented cap at offset=5000 (returns 0 records
         # beyond that). API reports count=80216 but only serves max 5000. Our pagination
         # is correct — the API itself stops. Use tolerance to account for this.
-        ("series_search", "/series/search", {"search_text": "GDP"}, "Series search for GDP (API caps at ~5000)"),
-        ("series_search_tags", "/series/search/tags", {"series_search_text": "GDP"}, "Search tags for GDP"),
+        (
+            "series_search",
+            "/series/search",
+            {"search_text": "GDP"},
+            "Series search for GDP (API caps at ~5000)",
+        ),
+        (
+            "series_search_tags",
+            "/series/search/tags",
+            {"series_search_text": "GDP"},
+            "Search tags for GDP",
+        ),
         ("series_updates", "/series/updates", None, "Series updates"),
-        ("related_tags", "/related_tags", {"tag_names": "gdp", "order_by": "name", "sort_order": "asc"}, "Related tags for gdp"),
+        (
+            "related_tags",
+            "/related_tags",
+            {"tag_names": "gdp", "order_by": "name", "sort_order": "asc"},
+            "Related tags for gdp",
+        ),
     ]
 
     all_pass = True
@@ -92,9 +116,12 @@ def reconcile():
         if not match:
             all_pass = False
         # Show both API total and effective expected when capped
-        expected_str = f"{expected}" if not cap else f"{expected} (cap:{cap})"
-
-        print(f"{stream_name:<30} {expected:>10} {actual:>10} {status:>8}")
+        if cap:
+            print(
+                f"{stream_name:<30} {expected:>10} (cap:{cap}) {actual:>10} {status:>8}"
+            )
+        else:
+            print(f"{stream_name:<30} {expected:>10} {actual:>10} {status:>8}")
 
     print()
     if all_pass:

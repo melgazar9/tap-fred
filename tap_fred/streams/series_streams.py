@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import typing as t
+
 from singer_sdk import typing as th
 from singer_sdk.helpers.types import Context
 
 from tap_fred.client import (
-    SeriesBasedFREDStream,
     FREDStream,
     PointInTimePartitionStream,
+    SeriesBasedFREDStream,
 )
 from tap_fred.helpers import join_tag_names
 
@@ -74,7 +75,12 @@ class SeriesObservationsStream(PointInTimePartitionStream):
 
     name = "series_observations"
     path = "/series/observations"
-    primary_keys: t.ClassVar[list[str]] = ["series_id", "date", "realtime_start", "realtime_end"]
+    primary_keys: t.ClassVar[list[str]] = [
+        "series_id",
+        "date",
+        "realtime_start",
+        "realtime_end",
+    ]
     _add_surrogate_key = False
 
     # Point-in-time partitioning configuration

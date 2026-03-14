@@ -45,6 +45,7 @@ class TagsStream(FREDStream):
     def _get_records_key(self) -> str:
         return "tags"
 
+
 class RelatedTagsStream(FREDStream):
     """Stream for FRED related tags - /fred/related_tags endpoint."""
 
@@ -72,15 +73,15 @@ class RelatedTagsStream(FREDStream):
 
         tag_names = self.config.get("tag_names")
         if not tag_names:
-            raise ValueError(
-                "RelatedTagsStream requires tag_names to be configured."
-            )
+            raise ValueError("RelatedTagsStream requires tag_names to be configured.")
 
-        self.query_params.update({
-            "sort_order": "asc",
-            "order_by": "name",
-            "tag_names": join_tag_names(tag_names),
-        })
+        self.query_params.update(
+            {
+                "sort_order": "asc",
+                "order_by": "name",
+                "tag_names": join_tag_names(tag_names),
+            }
+        )
 
     def _get_records_key(self) -> str:
         return "tags"
@@ -125,15 +126,15 @@ class TagsSeriesStream(FREDStream):
 
         tag_names = self.config.get("tag_names")
         if not tag_names:
-            raise ValueError(
-                "TagsSeriesStream requires tag_names to be configured."
-            )
+            raise ValueError("TagsSeriesStream requires tag_names to be configured.")
 
-        self.query_params.update({
-            "sort_order": "asc",
-            "order_by": "series_id",
-            "tag_names": join_tag_names(tag_names),
-        })
+        self.query_params.update(
+            {
+                "sort_order": "asc",
+                "order_by": "series_id",
+                "tag_names": join_tag_names(tag_names),
+            }
+        )
 
     def _get_records_key(self) -> str:
         return "seriess"

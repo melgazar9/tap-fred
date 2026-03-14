@@ -8,8 +8,8 @@ import pytest
 from singer_sdk import typing as th
 from singer_sdk.testing import get_tap_test_class
 
-from tap_fred.tap import TapFRED
 from tap_fred.client import FREDStream
+from tap_fred.tap import TapFRED
 
 SAMPLE_CONFIG = {
     "start_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
@@ -32,7 +32,9 @@ if os.environ.get("FRED_API_KEY"):
     )
 else:
 
-    @pytest.mark.skip(reason="FRED_API_KEY not set - SDK integration tests require a real API key")
+    @pytest.mark.skip(
+        reason="FRED_API_KEY not set - SDK integration tests require a real API key"
+    )
     class TestTapFRED:
         pass
 

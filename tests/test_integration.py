@@ -5,13 +5,13 @@ without requiring actual API keys or network calls.
 """
 
 import unittest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 import requests
-
-from tap_fred.tap import TapFRED
-from tap_fred.client import FREDStream
 from singer_sdk import typing as th
+
+from tap_fred.client import FREDStream
+from tap_fred.tap import TapFRED
 
 
 class TestTapFREDIntegration(unittest.TestCase):
@@ -286,9 +286,11 @@ class TestRegressionFixes(unittest.TestCase):
             yield  # noqa: unreachable - makes this a generator
 
         with self.assertRaises(requests.exceptions.HTTPError):
-            list(stream._safe_partition_extraction(
-                failing_generator(), "BAD_ID", "test_id"
-            ))
+            list(
+                stream._safe_partition_extraction(
+                    failing_generator(), "BAD_ID", "test_id"
+                )
+            )
 
         # Verify it was tracked before re-raising
         self.assertEqual(len(stream._skipped_partitions), 1)
@@ -318,9 +320,9 @@ class TestRegressionFixes(unittest.TestCase):
             yield  # noqa: unreachable
 
         # Should NOT raise - error is swallowed
-        records = list(stream._safe_partition_extraction(
-            failing_generator(), "BAD_ID", "test_id"
-        ))
+        records = list(
+            stream._safe_partition_extraction(failing_generator(), "BAD_ID", "test_id")
+        )
         self.assertEqual(records, [])
         self.assertEqual(len(stream._skipped_partitions), 1)
 
@@ -346,9 +348,11 @@ class TestRegressionFixes(unittest.TestCase):
             yield  # noqa: unreachable
 
         with self.assertRaises(ValueError):
-            list(stream._safe_partition_extraction(
-                failing_generator(), "BAD_ID", "test_id"
-            ))
+            list(
+                stream._safe_partition_extraction(
+                    failing_generator(), "BAD_ID", "test_id"
+                )
+            )
 
     @patch("tap_fred.client.FREDStream._make_request")
     def test_pagination_context_propagation(self, mock_request):
@@ -376,7 +380,7 @@ class TestRegressionFixes(unittest.TestCase):
         }
 
         context = {"release_id": 53}
-        records = list(stream._paginate_records(context))
+        list(stream._paginate_records(context))  # consume to trigger the call
 
         # Verify the context was passed in params
         call_args = mock_request.call_args
@@ -462,8 +466,18 @@ class TestRegressionFixes(unittest.TestCase):
 
         # Simulate skipped partitions
         stream._skipped_partitions = [
-            {"stream": "test", "partition_key": "id", "partition_value": "1", "error": "HTTP 404"},
-            {"stream": "test", "partition_key": "id", "partition_value": "2", "error": "HTTP 400"},
+            {
+                "stream": "test",
+                "partition_key": "id",
+                "partition_value": "1",
+                "error": "HTTP 404",
+            },
+            {
+                "stream": "test",
+                "partition_key": "id",
+                "partition_value": "2",
+                "error": "HTTP 400",
+            },
         ]
 
         # Should log warning with summary (test that it doesn't crash)
@@ -474,7 +488,9 @@ class TestRegressionFixes(unittest.TestCase):
             mock_warn.assert_called()
             calls = [str(c) for c in mock_warn.call_args_list]
             summary_logged = any("2 skipped partition(s)" in c for c in calls)
-            self.assertTrue(summary_logged, f"Expected skip summary in log calls: {calls}")
+            self.assertTrue(
+                summary_logged, f"Expected skip summary in log calls: {calls}"
+            )
 
     def test_series_search_related_tags_gating(self):
         """SeriesSearchRelatedTagsStream only registered when both tag_names and search_text are configured."""
@@ -534,12 +550,24 @@ class TestIncrementalReplication(unittest.TestCase):
         """
         # Run 1 response: all historical observations
         run1_observations = [
-            {"realtime_start": "2024-01-01", "realtime_end": "2024-03-31",
-             "date": "2024-01-01", "value": "27000.0"},
-            {"realtime_start": "2024-06-01", "realtime_end": "2024-08-31",
-             "date": "2024-04-01", "value": "27200.0"},
-            {"realtime_start": "2024-09-01", "realtime_end": "2024-12-31",
-             "date": "2024-07-01", "value": "27500.0"},
+            {
+                "realtime_start": "2024-01-01",
+                "realtime_end": "2024-03-31",
+                "date": "2024-01-01",
+                "value": "27000.0",
+            },
+            {
+                "realtime_start": "2024-06-01",
+                "realtime_end": "2024-08-31",
+                "date": "2024-04-01",
+                "value": "27200.0",
+            },
+            {
+                "realtime_start": "2024-09-01",
+                "realtime_end": "2024-12-31",
+                "date": "2024-07-01",
+                "value": "27500.0",
+            },
         ]
         mock_request.return_value = {"observations": run1_observations}
 
@@ -555,12 +583,24 @@ class TestIncrementalReplication(unittest.TestCase):
 
         # Run 2: API returns only records at or after bookmark (2024-06-01)
         run2_observations = [
-            {"realtime_start": "2024-06-01", "realtime_end": "2024-08-31",
-             "date": "2024-04-01", "value": "27200.0"},
-            {"realtime_start": "2024-09-01", "realtime_end": "2024-12-31",
-             "date": "2024-07-01", "value": "27500.0"},
-            {"realtime_start": "2025-01-15", "realtime_end": "2025-03-31",
-             "date": "2024-10-01", "value": "27800.0"},
+            {
+                "realtime_start": "2024-06-01",
+                "realtime_end": "2024-08-31",
+                "date": "2024-04-01",
+                "value": "27200.0",
+            },
+            {
+                "realtime_start": "2024-09-01",
+                "realtime_end": "2024-12-31",
+                "date": "2024-07-01",
+                "value": "27500.0",
+            },
+            {
+                "realtime_start": "2025-01-15",
+                "realtime_end": "2025-03-31",
+                "date": "2024-10-01",
+                "value": "27800.0",
+            },
         ]
         mock_request.return_value = {"observations": run2_observations}
 
@@ -611,10 +651,16 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
     @patch("tap_fred.client.FREDStream._make_request")
     def test_completed_vintage_partition_skips_api_call(self, mock_request):
         """A partition with an existing bookmark must NOT make any API call."""
-        mock_request.return_value = {"observations": [
-            {"date": "2024-01-01", "value": "100.0",
-             "realtime_start": "2020-01-30", "realtime_end": "2020-01-30"},
-        ]}
+        mock_request.return_value = {
+            "observations": [
+                {
+                    "date": "2024-01-01",
+                    "value": "100.0",
+                    "realtime_start": "2020-01-30",
+                    "realtime_end": "2020-01-30",
+                },
+            ]
+        }
 
         tap = TapFRED(config=self.config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
@@ -622,7 +668,11 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
         context = {"series_id": "GDP", "vintage_date": "2020-01-30"}
 
         # Simulate an existing bookmark from a previous sync
-        with patch.object(stream, "get_context_state", return_value={"replication_key_value": "2020-01-30"}):
+        with patch.object(
+            stream,
+            "get_context_state",
+            return_value={"replication_key_value": "2020-01-30"},
+        ):
             records = list(stream.get_records(context=context))
 
         # CRITICAL: No records emitted (partition is skipped)
@@ -633,10 +683,16 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
     @patch("tap_fred.client.FREDStream._make_request")
     def test_new_vintage_partition_fetches_normally(self, mock_request):
         """A partition WITHOUT a bookmark must fetch from the API."""
-        mock_request.return_value = {"observations": [
-            {"date": "2024-01-01", "value": "100.0",
-             "realtime_start": "2020-01-30", "realtime_end": "2020-01-30"},
-        ]}
+        mock_request.return_value = {
+            "observations": [
+                {
+                    "date": "2024-01-01",
+                    "value": "100.0",
+                    "realtime_start": "2020-01-30",
+                    "realtime_end": "2020-01-30",
+                },
+            ]
+        }
 
         tap = TapFRED(config=self.config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
@@ -653,10 +709,16 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
     @patch("tap_fred.client.FREDStream._make_request")
     def test_non_pit_partition_never_skipped(self, mock_request):
         """Non-point-in-time partitions (no vintage_date in context) must ALWAYS fetch."""
-        mock_request.return_value = {"observations": [
-            {"date": "2024-01-01", "value": "100.0",
-             "realtime_start": "2020-01-01", "realtime_end": "2020-01-01"},
-        ]}
+        mock_request.return_value = {
+            "observations": [
+                {
+                    "date": "2024-01-01",
+                    "value": "100.0",
+                    "realtime_start": "2020-01-01",
+                    "realtime_end": "2020-01-01",
+                },
+            ]
+        }
 
         config = {**self.config, "point_in_time_mode": False}
         tap = TapFRED(config=config)
@@ -665,7 +727,11 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
         context = {"series_id": "GDP"}  # No vintage_date
 
         # Even with a bookmark, non-PIT partitions must still fetch
-        with patch.object(stream, "get_context_state", return_value={"replication_key_value": "2020-01-01"}):
+        with patch.object(
+            stream,
+            "get_context_state",
+            return_value={"replication_key_value": "2020-01-01"},
+        ):
             records = list(stream.get_records(context=context))
 
         self.assertEqual(len(records), 1)
@@ -674,10 +740,16 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
     @patch("tap_fred.client.FREDStream._make_request")
     def test_run1_then_run2_skips_completed_partitions(self, mock_request):
         """Simulate full Run 1 → Run 2 lifecycle: Run 2 must skip synced partitions."""
-        observations = {"observations": [
-            {"date": "2024-01-01", "value": "100.0",
-             "realtime_start": "2020-01-30", "realtime_end": "2020-01-30"},
-        ]}
+        observations = {
+            "observations": [
+                {
+                    "date": "2024-01-01",
+                    "value": "100.0",
+                    "realtime_start": "2020-01-30",
+                    "realtime_end": "2020-01-30",
+                },
+            ]
+        }
         mock_request.return_value = observations
 
         tap = TapFRED(config=self.config)
@@ -694,7 +766,11 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
         mock_request.reset_mock()
 
         # Run 2: bookmark exists → skip
-        with patch.object(stream, "get_context_state", return_value={"replication_key_value": "2020-01-30"}):
+        with patch.object(
+            stream,
+            "get_context_state",
+            return_value={"replication_key_value": "2020-01-30"},
+        ):
             run2_records = list(stream.get_records(context=context))
         self.assertEqual(run2_records, [])
         mock_request.assert_not_called()
@@ -736,9 +812,7 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
     @patch("tap_fred.client.FREDStream._make_request")
     def test_vintage_dates_per_series_extraction(self, mock_request):
         """Each series partition must fetch only its own vintage dates."""
-        mock_request.return_value = {
-            "vintage_dates": ["2020-01-15", "2020-02-15"]
-        }
+        mock_request.return_value = {"vintage_dates": ["2020-01-15", "2020-02-15"]}
 
         config = {**self.config, "series_ids": ["GDP", "UNRATE"]}
         tap = TapFRED(config=config)
@@ -810,25 +884,41 @@ class TestAlfredPointInTimeAccuracy(unittest.TestCase):
         differs from GDP as-known-today because revisions happened.
         """
         # Simulate FRED (current) response: includes revised data through 2024
-        fred_response = {"observations": [
-            {"realtime_start": "2025-01-01", "realtime_end": "2025-01-01",
-             "date": "2019-10-01", "value": "21729.124"},  # Revised value
-        ]}
+        fred_response = {
+            "observations": [
+                {
+                    "realtime_start": "2025-01-01",
+                    "realtime_end": "2025-01-01",
+                    "date": "2019-10-01",
+                    "value": "21729.124",
+                },  # Revised value
+            ]
+        }
         # Simulate ALFRED (vintage) response: data as-known-on 2020-01-01
-        alfred_response = {"observations": [
-            {"realtime_start": "2020-01-01", "realtime_end": "2020-01-01",
-             "date": "2019-10-01", "value": "21734.266"},  # Initial estimate
-        ]}
+        alfred_response = {
+            "observations": [
+                {
+                    "realtime_start": "2020-01-01",
+                    "realtime_end": "2020-01-01",
+                    "date": "2019-10-01",
+                    "value": "21734.266",
+                },  # Initial estimate
+            ]
+        }
 
         # FRED mode
         tap_fred = TapFRED(config=self.fred_config)
-        stream_fred = {s.name: s for s in tap_fred.streams.values()}["series_observations"]
+        stream_fred = {s.name: s for s in tap_fred.streams.values()}[
+            "series_observations"
+        ]
         mock_request.return_value = fred_response
         fred_records = list(stream_fred.get_records(context={"series_id": "GDP"}))
 
         # ALFRED mode
         tap_alfred = TapFRED(config=self.alfred_config)
-        stream_alfred = {s.name: s for s in tap_alfred.streams.values()}["series_observations"]
+        stream_alfred = {s.name: s for s in tap_alfred.streams.values()}[
+            "series_observations"
+        ]
         mock_request.return_value = alfred_response
         alfred_records = list(stream_alfred.get_records(context={"series_id": "GDP"}))
 
@@ -863,18 +953,36 @@ class TestAlfredPointInTimeAccuracy(unittest.TestCase):
 
         # GDP Q4 2019 values at each vintage date (real revision pattern)
         vintage_responses = {
-            "2020-01-30": {"observations": [
-                {"realtime_start": "2020-01-30", "realtime_end": "2020-01-30",
-                 "date": "2019-10-01", "value": "21734.266"},  # Initial estimate
-            ]},
-            "2020-02-27": {"observations": [
-                {"realtime_start": "2020-02-27", "realtime_end": "2020-02-27",
-                 "date": "2019-10-01", "value": "21726.779"},  # First revision DOWN
-            ]},
-            "2020-03-26": {"observations": [
-                {"realtime_start": "2020-03-26", "realtime_end": "2020-03-26",
-                 "date": "2019-10-01", "value": "21729.124"},  # Settled value
-            ]},
+            "2020-01-30": {
+                "observations": [
+                    {
+                        "realtime_start": "2020-01-30",
+                        "realtime_end": "2020-01-30",
+                        "date": "2019-10-01",
+                        "value": "21734.266",
+                    },  # Initial estimate
+                ]
+            },
+            "2020-02-27": {
+                "observations": [
+                    {
+                        "realtime_start": "2020-02-27",
+                        "realtime_end": "2020-02-27",
+                        "date": "2019-10-01",
+                        "value": "21726.779",
+                    },  # First revision DOWN
+                ]
+            },
+            "2020-03-26": {
+                "observations": [
+                    {
+                        "realtime_start": "2020-03-26",
+                        "realtime_end": "2020-03-26",
+                        "date": "2019-10-01",
+                        "value": "21729.124",
+                    },  # Settled value
+                ]
+            },
         }
 
         def mock_request_side_effect(url, params):
@@ -893,8 +1001,9 @@ class TestAlfredPointInTimeAccuracy(unittest.TestCase):
         vintage_partition_dates = [
             p["vintage_date"] for p in partitions if "vintage_date" in p
         ]
-        self.assertEqual(vintage_partition_dates,
-                         ["2020-01-30", "2020-02-27", "2020-03-26"])
+        self.assertEqual(
+            vintage_partition_dates, ["2020-01-30", "2020-02-27", "2020-03-26"]
+        )
 
         # Extract records for each vintage partition
         all_values = []
@@ -943,10 +1052,16 @@ class TestEndpointContracts(unittest.TestCase):
     @patch("tap_fred.client.FREDStream._make_request")
     def test_series_observations_contract(self, mock_request):
         """series_observations must send series_id and parse 'observations' key."""
-        mock_request.return_value = {"observations": [
-            {"date": "2024-01-01", "value": "100.0",
-             "realtime_start": "2025-01-01", "realtime_end": "2025-01-01"},
-        ]}
+        mock_request.return_value = {
+            "observations": [
+                {
+                    "date": "2024-01-01",
+                    "value": "100.0",
+                    "realtime_start": "2025-01-01",
+                    "realtime_end": "2025-01-01",
+                },
+            ]
+        }
 
         tap = TapFRED(config=self.config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
@@ -961,10 +1076,12 @@ class TestEndpointContracts(unittest.TestCase):
 
     @patch("tap_fred.client.FREDStream._make_request")
     def test_releases_list_all_contract(self, mock_request):
-        """releases (list-all) must parse 'releases' key and paginate."""
-        mock_request.return_value = {"releases": [
-            {"id": "53", "name": "GDP", "press_release": "true"},
-        ]}
+        """Releases (list-all) must parse 'releases' key and paginate."""
+        mock_request.return_value = {
+            "releases": [
+                {"id": "53", "name": "GDP", "press_release": "true"},
+            ]
+        }
 
         tap = TapFRED(config=self.config)
         stream = {s.name: s for s in tap.streams.values()}["releases"]
@@ -977,16 +1094,25 @@ class TestEndpointContracts(unittest.TestCase):
 
     @patch("tap_fred.client.FREDStream._make_request")
     def test_tags_contract(self, mock_request):
-        """tags must parse 'tags' key (not default 'data')."""
-        mock_request.return_value = {"tags": [
-            {"name": "gdp", "group_id": "1", "popularity": "99", "series_count": "42"},
-        ]}
+        """Tags must parse 'tags' key (not default 'data')."""
+        mock_request.return_value = {
+            "tags": [
+                {
+                    "name": "gdp",
+                    "group_id": "1",
+                    "popularity": "99",
+                    "series_count": "42",
+                },
+            ]
+        }
 
         tap = TapFRED(config=self.config)
         stream = {s.name: s for s in tap.streams.values()}["tags"]
-        records = list(stream._fetch_and_process_records(
-            stream.get_url(), stream.query_params.copy(), None
-        ))
+        records = list(
+            stream._fetch_and_process_records(
+                stream.get_url(), stream.query_params.copy(), None
+            )
+        )
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["name"], "gdp")
@@ -997,10 +1123,12 @@ class TestEndpointContracts(unittest.TestCase):
     @patch("tap_fred.client.FREDStream._make_request")
     def test_category_children_injects_parent_id(self, mock_request):
         """category_children must inject parent_id from partition context."""
-        mock_request.return_value = {"categories": [
-            {"id": "100", "name": "Child Category"},
-            {"id": "101", "name": "Another Child"},
-        ]}
+        mock_request.return_value = {
+            "categories": [
+                {"id": "100", "name": "Child Category"},
+                {"id": "101", "name": "Another Child"},
+            ]
+        }
 
         tap = TapFRED(config=self.config)
         stream = {s.name: s for s in tap.streams.values()}["category_children"]
@@ -1049,7 +1177,7 @@ class TestPaginationCorrectness(unittest.TestCase):
             offset = params.get("offset", 0)
             if offset == 0:
                 return {"items": [{"id": "a"}, {"id": "b"}]}  # Full page
-            elif offset == 2:
+            if offset == 2:
                 return {"items": [{"id": "c"}]}  # Partial page = last
             return {"items": []}
 
@@ -1180,7 +1308,10 @@ class TestPaginationCorrectness(unittest.TestCase):
             call_count += 1
             offset = params.get("offset", 0)
             if offset < 4:
-                return {"count": 100, "items": [{"id": str(offset)}, {"id": str(offset + 1)}]}
+                return {
+                    "count": 100,
+                    "items": [{"id": str(offset)}, {"id": str(offset + 1)}],
+                }
             # Simulate FRED's offset cap: 400 error
             resp = requests.models.Response()
             resp.status_code = 400
@@ -1245,10 +1376,13 @@ class TestWildcardDiscovery(unittest.TestCase):
 
         # Simulate cached discovery results (3 releases found)
         tap._cached_release_ids = [
-            {"release_id": 10}, {"release_id": 53}, {"release_id": 151},
+            {"release_id": 10},
+            {"release_id": 53},
+            {"release_id": 151},
         ]
 
         from tap_fred.streams.releases_streams import ReleaseSeriesStream
+
         stream = ReleaseSeriesStream(tap)
         partitions = stream.partitions
 
@@ -1262,10 +1396,13 @@ class TestWildcardDiscovery(unittest.TestCase):
         tap = TapFRED(config=config)
 
         tap._cached_category_ids = [
-            {"category_id": 0}, {"category_id": 18}, {"category_id": 32992},
+            {"category_id": 0},
+            {"category_id": 18},
+            {"category_id": 32992},
         ]
 
         from tap_fred.streams.category_streams import CategoryChildrenStream
+
         stream = CategoryChildrenStream(tap)
         partitions = stream.partitions
 
@@ -1277,6 +1414,7 @@ class TestWildcardDiscovery(unittest.TestCase):
         tap = TapFRED(config=config)
 
         from tap_fred.streams.releases_streams import ReleaseSeriesStream
+
         stream = ReleaseSeriesStream(tap)
         partitions = stream.partitions
 
@@ -1289,14 +1427,20 @@ class TestWildcardDiscovery(unittest.TestCase):
         config = {
             **self.config,
             "geofred_regional_params": [
-                {"series_group": "882", "region_type": "state",
-                 "season": "*", "date": "2013-01-01",
-                 "units": "Dollars", "frequency": "a"},
+                {
+                    "series_group": "882",
+                    "region_type": "state",
+                    "season": "*",
+                    "date": "2013-01-01",
+                    "units": "Dollars",
+                    "frequency": "a",
+                },
             ],
         }
         tap = TapFRED(config=config)
 
         from tap_fred.streams.maps_streams import GeoFREDRegionalDataStream
+
         stream = GeoFREDRegionalDataStream(tap)
         partitions = stream.partitions
 
@@ -1325,10 +1469,16 @@ class TestStrictPermissiveErrorModes(unittest.TestCase):
         def request_side_effect(url, params):
             if params.get("series_id") == "INVALID":
                 raise requests.exceptions.HTTPError(response=mock_response)
-            return {"observations": [
-                {"date": "2024-01-01", "value": "100",
-                 "realtime_start": "2025-01-01", "realtime_end": "2025-01-01"}
-            ]}
+            return {
+                "observations": [
+                    {
+                        "date": "2024-01-01",
+                        "value": "100",
+                        "realtime_start": "2025-01-01",
+                        "realtime_end": "2025-01-01",
+                    }
+                ]
+            }
 
         mock_request.side_effect = request_side_effect
 
@@ -1351,10 +1501,16 @@ class TestStrictPermissiveErrorModes(unittest.TestCase):
         def request_side_effect(url, params):
             if params.get("series_id") == "INVALID":
                 raise requests.exceptions.HTTPError(response=mock_response)
-            return {"observations": [
-                {"date": "2024-01-01", "value": "100",
-                 "realtime_start": "2025-01-01", "realtime_end": "2025-01-01"}
-            ]}
+            return {
+                "observations": [
+                    {
+                        "date": "2024-01-01",
+                        "value": "100",
+                        "realtime_start": "2025-01-01",
+                        "realtime_end": "2025-01-01",
+                    }
+                ]
+            }
 
         mock_request.side_effect = request_side_effect
 
@@ -1389,9 +1545,24 @@ class TestStrictPermissiveErrorModes(unittest.TestCase):
         stream = MockStream(tap)
 
         stream._skipped_partitions = [
-            {"stream": "test", "partition_key": "id", "partition_value": "BAD1", "error": "HTTP 404"},
-            {"stream": "test", "partition_key": "id", "partition_value": "BAD2", "error": "HTTP 400"},
-            {"stream": "test", "partition_key": "id", "partition_value": "BAD3", "error": "ValueError"},
+            {
+                "stream": "test",
+                "partition_key": "id",
+                "partition_value": "BAD1",
+                "error": "HTTP 404",
+            },
+            {
+                "stream": "test",
+                "partition_key": "id",
+                "partition_value": "BAD2",
+                "error": "HTTP 400",
+            },
+            {
+                "stream": "test",
+                "partition_key": "id",
+                "partition_value": "BAD3",
+                "error": "ValueError",
+            },
         ]
 
         with patch.object(stream.logger, "warning") as mock_warn:
@@ -1401,7 +1572,7 @@ class TestStrictPermissiveErrorModes(unittest.TestCase):
             # Summary line must state exact count
             self.assertTrue(
                 any("3 skipped partition(s)" in c for c in calls),
-                f"Expected '3 skipped partition(s)' in: {calls}"
+                f"Expected '3 skipped partition(s)' in: {calls}",
             )
             # Each individual skip must be logged
             self.assertTrue(any("BAD1" in c for c in calls))
@@ -1441,22 +1612,34 @@ class TestDataLeakagePrevention(unittest.TestCase):
             {"resource_id": "DGS10", "vintage_date": "2025-01-03"},
         ]
 
-        with patch.object(tap, "get_cached_vintage_dates", return_value=mock_vintage_dates), \
-             patch.object(tap, "get_cached_series_ids", return_value=[
-                 {"series_id": "GDP"}, {"series_id": "DGS10"}
-             ]):
+        with (
+            patch.object(
+                tap, "get_cached_vintage_dates", return_value=mock_vintage_dates
+            ),
+            patch.object(
+                tap,
+                "get_cached_series_ids",
+                return_value=[{"series_id": "GDP"}, {"series_id": "DGS10"}],
+            ),
+        ):
             partitions = stream.partitions
 
         # GDP must NOT have any partitions (no fallback)
         gdp_partitions = [p for p in partitions if p.get("series_id") == "GDP"]
-        self.assertEqual(len(gdp_partitions), 0, "GDP should have zero partitions — no fallback allowed")
+        self.assertEqual(
+            len(gdp_partitions),
+            0,
+            "GDP should have zero partitions — no fallback allowed",
+        )
 
         # DGS10 must have exactly 2 partitions (one per vintage date)
         dgs10_partitions = [p for p in partitions if p.get("series_id") == "DGS10"]
         self.assertEqual(len(dgs10_partitions), 2)
         # Each partition must have a vintage_date
         for p in dgs10_partitions:
-            self.assertIn("vintage_date", p, "Every PIT partition must have vintage_date")
+            self.assertIn(
+                "vintage_date", p, "Every PIT partition must have vintage_date"
+            )
 
     @patch("tap_fred.client.FREDStream._make_request")
     def test_data_leakage_guard_raises_on_mismatch(self, mock_request):
@@ -1466,10 +1649,16 @@ class TestDataLeakagePrevention(unittest.TestCase):
         vintage than requested — silent data contamination.
         """
         # API returns realtime_start=2025-01-15 but we requested vintage_date=2025-01-02
-        mock_request.return_value = {"observations": [
-            {"date": "2024-10-01", "value": "21000.0",
-             "realtime_start": "2025-01-15", "realtime_end": "2025-01-15"},
-        ]}
+        mock_request.return_value = {
+            "observations": [
+                {
+                    "date": "2024-10-01",
+                    "value": "21000.0",
+                    "realtime_start": "2025-01-15",
+                    "realtime_end": "2025-01-15",
+                },
+            ]
+        }
 
         tap = TapFRED(config=self.pit_config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
@@ -1487,10 +1676,16 @@ class TestDataLeakagePrevention(unittest.TestCase):
     @patch("tap_fred.client.FREDStream._make_request")
     def test_data_leakage_guard_passes_on_match(self, mock_request):
         """Fix 2 (positive case): No error when realtime_start matches vintage_date."""
-        mock_request.return_value = {"observations": [
-            {"date": "2024-10-01", "value": "4.25",
-             "realtime_start": "2025-01-02", "realtime_end": "2025-01-02"},
-        ]}
+        mock_request.return_value = {
+            "observations": [
+                {
+                    "date": "2024-10-01",
+                    "value": "4.25",
+                    "realtime_start": "2025-01-02",
+                    "realtime_end": "2025-01-02",
+                },
+            ]
+        }
 
         tap = TapFRED(config=self.pit_config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
@@ -1515,11 +1710,15 @@ class TestDataLeakagePrevention(unittest.TestCase):
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
 
         schema_properties = stream.schema.get("properties", {})
-        self.assertIn("vintage_date", schema_properties,
-                      "vintage_date must be in schema so SDK doesn't silently drop it")
+        self.assertIn(
+            "vintage_date",
+            schema_properties,
+            "vintage_date must be in schema so SDK doesn't silently drop it",
+        )
         self.assertEqual(
-            schema_properties["vintage_date"]["format"], "date",
-            "vintage_date must be DateType (format=date)"
+            schema_properties["vintage_date"]["format"],
+            "date",
+            "vintage_date must be DateType (format=date)",
         )
 
 
@@ -1555,8 +1754,6 @@ class TestInstitutionalHardening(unittest.TestCase):
 
     def test_empty_resource_ids_returns_empty_partitions(self):
         """Fix 6b: Empty resource_ids cache must return [] partitions, not IndexError."""
-        from tap_fred.client import PointInTimePartitionStream
-
         config = {
             **self.base_config,
             "point_in_time_mode": True,
@@ -1650,8 +1847,6 @@ class TestInstitutionalHardening(unittest.TestCase):
     @patch("tap_fred.client.FREDStream._make_request")
     def test_category_bfs_permissive_continues(self, mock_request):
         """Fix 8: In permissive mode, RequestException during BFS must be logged and skipped."""
-        from tap_fred.streams.category_streams import CategoryStream
-
         call_log = []
 
         def side_effect(url, params):

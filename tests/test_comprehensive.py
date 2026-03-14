@@ -24,7 +24,12 @@ class TestTapFREDComprehensive(unittest.TestCase):
             "start_date": "2024-01-01",
             # GeoFRED config required for conditional stream registration
             "geofred_regional_params": [
-                {"series_group": "882", "region_type": "state", "season": "SA", "date": "2013-01-01"},
+                {
+                    "series_group": "882",
+                    "region_type": "state",
+                    "season": "SA",
+                    "date": "2013-01-01",
+                },
             ],
             "geofred_series_ids": ["CAHOWN"],
             # SeriesSearchRelatedTags requires both search_text and tag_names

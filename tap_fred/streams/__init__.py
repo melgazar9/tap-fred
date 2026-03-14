@@ -1,59 +1,58 @@
 """FRED streams."""
 
 # Series streams
-from tap_fred.streams.series_streams import (
-    SeriesStream,
-    SeriesObservationsStream,
-    SeriesCategoriesStream,
-    SeriesReleaseStream,
-    SeriesSearchStream,
-    SeriesSearchTagsStream,
-    SeriesSearchRelatedTagsStream,
-    SeriesTagsStream,
-    SeriesUpdatesStream,
-    SeriesVintageDatesStream,
-)
-
 # Category streams
 from tap_fred.streams.category_streams import (
-    CategoryStream,
     CategoryChildrenStream,
     CategoryRelatedStream,
-    CategorySeriesStream,
-    CategoryTagsStream,
     CategoryRelatedTagsStream,
-)
-
-# Release streams
-from tap_fred.streams.releases_streams import (
-    ReleasesStream,
-    ReleaseStream,
-    ReleaseDatesStream,
-    ReleaseSeriesStream,
-    ReleaseSourcesStream,
-    ReleaseTagsStream,
-    ReleaseRelatedTagsStream,
-    ReleaseTablesStream,
-)
-
-# Source streams
-from tap_fred.streams.sources_streams import (
-    SourcesStream,
-    SourceStream,
-    SourceReleasesStream,
-)
-
-# Tag streams
-from tap_fred.streams.tags_streams import (
-    TagsStream,
-    RelatedTagsStream,
-    TagsSeriesStream,
+    CategorySeriesStream,
+    CategoryStream,
+    CategoryTagsStream,
 )
 
 # Maps/GeoFRED streams
 from tap_fred.streams.maps_streams import (
     GeoFREDRegionalDataStream,
     GeoFREDSeriesDataStream,
+)
+
+# Release streams
+from tap_fred.streams.releases_streams import (
+    ReleaseDatesStream,
+    ReleaseRelatedTagsStream,
+    ReleaseSeriesStream,
+    ReleaseSourcesStream,
+    ReleasesStream,
+    ReleaseStream,
+    ReleaseTablesStream,
+    ReleaseTagsStream,
+)
+from tap_fred.streams.series_streams import (
+    SeriesCategoriesStream,
+    SeriesObservationsStream,
+    SeriesReleaseStream,
+    SeriesSearchRelatedTagsStream,
+    SeriesSearchStream,
+    SeriesSearchTagsStream,
+    SeriesStream,
+    SeriesTagsStream,
+    SeriesUpdatesStream,
+    SeriesVintageDatesStream,
+)
+
+# Source streams
+from tap_fred.streams.sources_streams import (
+    SourceReleasesStream,
+    SourcesStream,
+    SourceStream,
+)
+
+# Tag streams
+from tap_fred.streams.tags_streams import (
+    RelatedTagsStream,
+    TagsSeriesStream,
+    TagsStream,
 )
 
 __all__ = [

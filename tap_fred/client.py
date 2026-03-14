@@ -5,11 +5,10 @@ from __future__ import annotations
 import logging
 import random
 import re
-import threading
 import time
 import typing as t
 from abc import ABC
-from collections import deque
+
 import backoff
 import jsonpath_ng
 import requests
@@ -65,8 +64,7 @@ class FREDStream(RESTStream, ABC):
         return re.sub(r"(api_key=)[^&\s]+", r"\1<REDACTED>", msg)
 
     def _throttle(self) -> None:
-        """
-        Throttle requests using sliding window rate limiting to enforce max requests per minute.
+        """Throttle requests using sliding window rate limiting to enforce max requests per minute.
 
         This implementation:
         1. Tracks request timestamps in a sliding 60-second window
@@ -209,11 +207,13 @@ class FREDStream(RESTStream, ABC):
                     f"Client error {status_code} for {redacted_url}: "
                     f"{response_body}. Skipping - data may be missing."
                 )
-                self._skipped_partitions.append({
-                    "stream": self.name,
-                    "url": redacted_url,
-                    "status_code": status_code,
-                })
+                self._skipped_partitions.append(
+                    {
+                        "stream": self.name,
+                        "url": redacted_url,
+                        "status_code": status_code,
+                    }
+                )
                 if self.config.get("strict_mode", False):
                     raise
                 return {}
@@ -243,18 +243,24 @@ class FREDStream(RESTStream, ABC):
         try:
             yield from generator
         except requests.exceptions.HTTPError as e:
-            status_code = e.response.status_code if hasattr(e, 'response') and e.response else "unknown"
+            status_code = (
+                e.response.status_code
+                if hasattr(e, "response") and e.response
+                else "unknown"
+            )
             self.logger.error(
                 f"Failed to extract {resource_id_key}={resource_id} after retries "
                 f"(HTTP {status_code}). Skipping this partition and continuing with others."
             )
-            self.logger.debug(f"Error details for {resource_id}: {str(e)}")
-            self._skipped_partitions.append({
-                "stream": self.name,
-                "partition_key": resource_id_key,
-                "partition_value": resource_id,
-                "error": f"HTTP {status_code}",
-            })
+            self.logger.debug(f"Error details for {resource_id}: {e!s}")
+            self._skipped_partitions.append(
+                {
+                    "stream": self.name,
+                    "partition_key": resource_id_key,
+                    "partition_value": resource_id,
+                    "error": f"HTTP {status_code}",
+                }
+            )
             if self.config.get("strict_mode", False):
                 raise
         except RuntimeError:
@@ -267,13 +273,15 @@ class FREDStream(RESTStream, ABC):
                 f"Unexpected error extracting {resource_id_key}={resource_id}: {type(e).__name__}. "
                 f"Skipping this partition and continuing with others."
             )
-            self.logger.debug(f"Error details for {resource_id}: {str(e)}")
-            self._skipped_partitions.append({
-                "stream": self.name,
-                "partition_key": resource_id_key,
-                "partition_value": resource_id,
-                "error": type(e).__name__,
-            })
+            self.logger.debug(f"Error details for {resource_id}: {e!s}")
+            self._skipped_partitions.append(
+                {
+                    "stream": self.name,
+                    "partition_key": resource_id_key,
+                    "partition_value": resource_id,
+                    "error": type(e).__name__,
+                }
+            )
             if self.config.get("strict_mode", False):
                 raise
 
@@ -291,7 +299,7 @@ class FREDStream(RESTStream, ABC):
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
         """Retrieve records from the API - uses pagination if _paginate flag is True."""
         # Check if this is a partition-based stream
-        resource_id_key = getattr(self, '_resource_id_key', None)
+        resource_id_key = getattr(self, "_resource_id_key", None)
         is_partition = context and resource_id_key and resource_id_key in context
 
         def extract_records():
@@ -336,10 +344,18 @@ class FREDStream(RESTStream, ABC):
         return "data"
 
     # Fields that FRED returns as strings but should be integers
-    _INTEGER_FIELDS = frozenset({
-        "id", "parent_id", "category_id", "release_id", "source_id",
-        "popularity", "series_count", "group_popularity",
-    })
+    _INTEGER_FIELDS = frozenset(
+        {
+            "id",
+            "parent_id",
+            "category_id",
+            "release_id",
+            "source_id",
+            "popularity",
+            "series_count",
+            "group_popularity",
+        }
+    )
 
     def post_process(self, record: dict, context: Context | None = None) -> dict:
         """Transform raw FRED API response record into schema-compliant format.
@@ -463,7 +479,11 @@ class FREDStream(RESTStream, ABC):
                 # (e.g. /series/search returns 400 at offset > 4000)
                 resp = getattr(page_err, "response", None)
                 body = resp.text[:300] if resp is not None and resp.text else ""
-                if resp is not None and resp.status_code == 400 and "maximum" in body.lower():
+                if (
+                    resp is not None
+                    and resp.status_code == 400
+                    and "maximum" in body.lower()
+                ):
                     self.logger.warning(
                         f"Stream '{self.name}': API offset cap reached at offset={offset} "
                         f"({total_yielded} records extracted). Response: {body.strip()}"
@@ -632,7 +652,6 @@ class TreeTraversalFREDStream(FREDStream):
         return record.get("id")
 
 
-
 class SeriesBasedFREDStream(FREDStream):
     """Base class for FRED streams that operate on series data."""
 
@@ -672,7 +691,9 @@ class ReleaseBasedFREDStream(FREDStream):
 class CategoryBasedFREDStream(FREDStream):
     """Base class for all category-related streams."""
 
-    _resource_id_key = "category_id"  # Generic resource ID key for category-based streams
+    _resource_id_key = (
+        "category_id"  # Generic resource ID key for category-based streams
+    )
 
     @property
     def partitions(self):
@@ -754,12 +775,14 @@ class PointInTimePartitionStream(FREDStream):
                     f"Will NOT fall back to current data (prevents data leakage)."
                 )
                 continue
-            else:
-                # Create partition for each vintage date
-                for vintage_date in vintage_dates:
-                    partitions.append(
-                        {self._resource_id_key: resource_id, "vintage_date": vintage_date}
-                    )
+            # Create partition for each vintage date
+            for vintage_date in vintage_dates:
+                partitions.append(
+                    {
+                        self._resource_id_key: resource_id,
+                        "vintage_date": vintage_date,
+                    }
+                )
         return partitions
 
     def _get_vintage_dates_for_resource(self, resource_id: str) -> list[str]:
@@ -886,5 +909,5 @@ class PointInTimePartitionStream(FREDStream):
         yield from self._safe_partition_extraction(
             self._get_resource_records(resource_id, context),
             resource_id,
-            self._resource_id_key
+            self._resource_id_key,
         )

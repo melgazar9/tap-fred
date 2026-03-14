@@ -286,11 +286,10 @@ class GeoFREDSeriesDataStream(FREDStream):
                     f"Discovered {len(discovered_series_ids)} GeoFRED series IDs"
                 )
                 return discovered_series_ids
-            else:
-                raise ValueError(
-                    "No GeoFRED series IDs discovered via search. "
-                    "Configure explicit geofred_series_ids instead of using wildcard '*'."
-                )
+            raise ValueError(
+                "No GeoFRED series IDs discovered via search. "
+                "Configure explicit geofred_series_ids instead of using wildcard '*'."
+            )
 
         except Exception as e:
             raise ValueError(

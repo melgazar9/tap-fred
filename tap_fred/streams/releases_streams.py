@@ -51,6 +51,7 @@ class ReleasesStream(FREDStream):
     def _get_records_key(self) -> str:
         return "releases"
 
+
 class ReleaseStream(ReleaseBasedFREDStream):
     """Stream for individual FRED release - /fred/release endpoint.
 
