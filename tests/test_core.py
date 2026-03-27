@@ -102,3 +102,78 @@ class TestConfigAccess(unittest.TestCase):
         self.assertEqual(tap.config.get("realtime_end"), "2020-01-01")
         self.assertEqual(tap.config.get("point_in_time_start"), "2019-01-01")
         self.assertEqual(tap.config.get("point_in_time_end"), "2021-01-01")
+
+
+class TestSanitizeResourceId(unittest.TestCase):
+    """Test _sanitize_resource_id strips JSON array encoding from IDs."""
+
+    def test_plain_string_unchanged(self):
+        assert FREDStream._sanitize_resource_id("GDP") == "GDP"
+
+    def test_json_array_single_element(self):
+        assert FREDStream._sanitize_resource_id('["GDP"]') == "GDP"
+
+    def test_json_array_with_long_id(self):
+        assert (
+            FREDStream._sanitize_resource_id('["CLVMNACSCAB1GQEA19"]')
+            == "CLVMNACSCAB1GQEA19"
+        )
+
+    def test_multi_element_array_untouched(self):
+        # Multi-element arrays should not be silently collapsed
+        assert (
+            FREDStream._sanitize_resource_id('["GDP","UNRATE"]') == '["GDP","UNRATE"]'
+        )
+
+    def test_numeric_string(self):
+        assert FREDStream._sanitize_resource_id("125") == "125"
+
+    def test_whitespace_stripped(self):
+        assert FREDStream._sanitize_resource_id("  GDP  ") == "GDP"
+
+    def test_non_json_brackets_unchanged(self):
+        assert FREDStream._sanitize_resource_id("[not json") == "[not json"
+
+
+class TestSeriesIdNormalization(unittest.TestCase):
+    """Test that series_ids config is properly normalized regardless of input format.
+
+    Reproduces the production bug where '["GDP"]' (JSON string from env vars)
+    was wrapped as ['["GDP"]'] instead of decoded to ["GDP"].
+    """
+
+    def test_json_string_decoded_to_list(self):
+        """String '["GDP"]' from env var must decode to list ["GDP"], not ['["GDP"]']."""
+        config = {**SAMPLE_CONFIG, "series_ids": '["GDP"]'}
+        tap = TapFRED(config=config)
+        assert tap.config["series_ids"] == ["GDP"]
+
+    def test_json_string_multi_element(self):
+        config = {**SAMPLE_CONFIG, "series_ids": '["GDP","UNRATE"]'}
+        tap = TapFRED(config=config)
+        assert tap.config["series_ids"] == ["GDP", "UNRATE"]
+
+    def test_plain_string_wrapped(self):
+        """Plain string 'GDP' wraps as ['GDP']."""
+        config = {**SAMPLE_CONFIG, "series_ids": "GDP"}
+        tap = TapFRED(config=config)
+        assert tap.config["series_ids"] == ["GDP"]
+
+    def test_list_passthrough(self):
+        """Already a list — no change needed."""
+        config = {**SAMPLE_CONFIG, "series_ids": ["GDP", "UNRATE"]}
+        tap = TapFRED(config=config)
+        assert tap.config["series_ids"] == ["GDP", "UNRATE"]
+
+    def test_cache_sanitizes_double_encoded_elements(self):
+        """If list element is '["GDP"]' (double-encoded), cache must unwrap it."""
+        config = {**SAMPLE_CONFIG, "series_ids": ['["GDP"]', "UNRATE"]}
+        tap = TapFRED(config=config)
+        cached = tap.get_cached_series_ids()
+        ids = [item["series_id"] for item in cached]
+        assert ids == ["GDP", "UNRATE"]
+
+    def test_wildcard_unchanged(self):
+        config = {**SAMPLE_CONFIG, "series_ids": ["*"]}
+        tap = TapFRED(config=config)
+        assert tap.config["series_ids"] == ["*"]

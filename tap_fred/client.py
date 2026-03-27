@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import re
@@ -62,6 +63,23 @@ class FREDStream(RESTStream, ABC):
     @staticmethod
     def redact_api_key(msg):
         return re.sub(r"(api_key=)[^&\s]+", r"\1<REDACTED>", msg)
+
+    @staticmethod
+    def _sanitize_resource_id(resource_id: str) -> str:
+        """Strip accidental JSON array encoding from a resource ID.
+
+        Env-var or meltano config round-tripping can turn 'GDP' into '["GDP"]'.
+        FRED API rejects the bracketed form (>25 chars or invalid characters).
+        """
+        stripped = str(resource_id).strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                decoded = json.loads(stripped)
+                if isinstance(decoded, list) and len(decoded) == 1:
+                    return str(decoded[0])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return stripped
 
     def _throttle(self) -> None:
         """Throttle requests using sliding window rate limiting to enforce max requests per minute.
@@ -465,6 +483,14 @@ class FREDStream(RESTStream, ABC):
         total_yielded = 0
         api_reported_count: int | None = None
 
+        # Sanitize resource ID in context once (context is immutable across pages)
+        resource_id_key = getattr(self, "_resource_id_key", None)
+        if context and resource_id_key and resource_id_key in context:
+            context = {
+                **context,
+                resource_id_key: self._sanitize_resource_id(context[resource_id_key]),
+            }
+
         while True:
             params = self.query_params.copy()
             if context:
@@ -662,7 +688,9 @@ class SeriesBasedFREDStream(FREDStream):
         series_ids = self._get_series_ids()
 
         for series_id in series_ids:
-            yield from self._get_series_records(series_id, context)
+            yield from self._get_series_records(
+                self._sanitize_resource_id(series_id), context
+            )
 
     def _get_series_ids(self) -> list[str]:
         """Get series IDs from tap configuration."""
@@ -818,6 +846,7 @@ class PointInTimePartitionStream(FREDStream):
         self, resource_id: str, context: Context | None
     ) -> t.Iterable[dict]:
         """Retrieve records for a specific resource ID."""
+        resource_id = self._sanitize_resource_id(resource_id)
         url = self.get_url()
         params = self.query_params.copy()
         params.update(

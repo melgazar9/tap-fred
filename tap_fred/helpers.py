@@ -1,5 +1,6 @@
 """Helper functions for tap-fred."""
 
+import json
 import re
 import uuid
 
@@ -57,3 +58,42 @@ def coerce_str_to_bool(value) -> bool:
     if isinstance(value, str):
         return value.lower() == "true"
     return bool(value)
+
+
+def normalize_config_list(value) -> list[str]:
+    """Normalize a config value to a clean list of string IDs.
+
+    Handles all the ways IDs can arrive from env vars / meltano / Singer SDK:
+    - Already a list: ``["GDP", "UNRATE"]`` -> passthrough
+    - JSON-encoded string: ``'["GDP","UNRATE"]'`` -> decoded to list
+    - Plain string: ``"GDP"`` -> wrapped as ``["GDP"]``
+    - Double-encoded elements: ``['["GDP"]', "UNRATE"]`` -> ``["GDP", "UNRATE"]``
+    """
+    # Decode outer string to list
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+            if isinstance(decoded, list):
+                value = decoded
+            else:
+                value = [value]
+        except (json.JSONDecodeError, TypeError):
+            value = [value]
+
+    if not isinstance(value, list):
+        return [str(value)]
+
+    # Unwrap double-encoded elements
+    clean: list[str] = []
+    for item in value:
+        s = str(item).strip()
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                inner = json.loads(s)
+                if isinstance(inner, list):
+                    clean.extend(str(x) for x in inner)
+                    continue
+            except (json.JSONDecodeError, TypeError):
+                pass
+        clean.append(s)
+    return clean

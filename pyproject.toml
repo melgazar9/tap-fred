@@ -35,6 +35,7 @@ s3 = [
 [project.scripts]
 # CLI declaration
 tap-fred = 'tap_fred.tap:TapFRED.cli'
+tap-fred-discover-series = 'tap_fred.discovery:main'
 
 [dependency-groups]
 dev = [

@@ -157,6 +157,7 @@ class SeriesCategoriesStream(SeriesBasedFREDStream):
         self, series_id: str, context: Context | None
     ) -> t.Iterable[dict]:
         """Get categories for a specific series ID."""
+
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
@@ -196,6 +197,7 @@ class SeriesReleaseStream(SeriesBasedFREDStream):
         self, series_id: str, context: Context | None
     ) -> t.Iterable[dict]:
         """Get release for a specific series ID."""
+
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
@@ -341,6 +343,7 @@ class SeriesTagsStream(SeriesBasedFREDStream):
         Note: Tags are metadata that don't have vintage dates, so we skip
         ALFRED parameters to avoid server timeouts.
         """
+
         url = self.get_url()
         params = self.query_params.copy()
         params.update({"series_id": series_id})
@@ -429,9 +432,10 @@ class SeriesVintageDatesStream(SeriesBasedFREDStream):
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
         """Get vintage dates for a single series from partition context."""
         if context and "series_id" in context:
+            sid = self._sanitize_resource_id(context["series_id"])
             yield from self._safe_partition_extraction(
-                self._get_series_records(context["series_id"], context),
-                context["series_id"],
+                self._get_series_records(sid, context),
+                sid,
                 "series_id",
             )
         else:
@@ -445,6 +449,7 @@ class SeriesVintageDatesStream(SeriesBasedFREDStream):
         Paginated per FRED docs: /fred/series/vintagedates supports limit (max 10000) and offset.
         Filters by bookmark to avoid re-emitting already-synced dates.
         """
+
         url = self.get_url()
         offset = 0
         limit = 10000  # FRED docs max for this endpoint

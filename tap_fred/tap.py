@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections import deque
 from threading import Lock
 
-import requests
 from singer_sdk import Tap
 from singer_sdk import typing as th
 
 from tap_fred.client import FREDStream
+from tap_fred.discovery import discover_all_series_ids
+from tap_fred.helpers import normalize_config_list
 from tap_fred.streams import (
     CategoryChildrenStream,
     CategoryRelatedStream,
@@ -138,6 +139,22 @@ class TapFRED(Tap):
             description="Enable geographic/regional data streams (default: true)",
         ),
         th.Property(
+            "data_mode",
+            th.StringType,
+            default="FRED",
+            description="Data mode: 'FRED' for current revised data, 'ALFRED' for vintage historical data",
+        ),
+        th.Property(
+            "realtime_start",
+            th.DateTimeType,
+            description="Vintage start date for ALFRED mode (YYYY-MM-DD)",
+        ),
+        th.Property(
+            "realtime_end",
+            th.DateTimeType,
+            description="Vintage end date for ALFRED mode (YYYY-MM-DD)",
+        ),
+        th.Property(
             "point_in_time_mode",
             th.BooleanType,
             default=False,
@@ -195,10 +212,10 @@ class TapFRED(Tap):
 
     def _validate_tap_config(self) -> None:
         """Validate config at startup to catch misconfigurations early."""
-        # Fix 6a: Normalize string series_ids to list to prevent char-by-char iteration
         series_ids = self.config.get("series_ids")
-        if isinstance(series_ids, str):
-            self._config["series_ids"] = [series_ids]
+        if isinstance(series_ids, (str, list)):
+            self._config["series_ids"] = normalize_config_list(series_ids)
+            series_ids = self._config["series_ids"]
 
         if isinstance(series_ids, list) and len(series_ids) == 0:
             raise ValueError(
@@ -242,78 +259,13 @@ class TapFRED(Tap):
         """Return cached vintage dates in consistent format [{'vintage_date': str}]."""
         return self._cache_resource_ids("vintage_date", SeriesVintageDatesStream(self))
 
-    _DISCOVERY_PAGE_LIMIT = 1000
-
-    def _collect_series_ids_from_resource(
-        self,
-        stream: FREDStream,
-        cached_items: list[dict],
-        resource_key: str,
-        label: str,
-        series_ids: set[str],
-    ) -> None:
-        """Paginate a resource-partitioned stream and collect series IDs into a set."""
-        self.logger.info(
-            f"Discovering series from {len(cached_items)} {label.lower()}s..."
-        )
-        url = stream.get_url()
-        for item in cached_items:
-            resource_id = item[resource_key]
-            try:
-                offset = 0
-                total = 0
-                while True:
-                    params = stream.query_params.copy()
-                    params[resource_key] = resource_id
-                    params["limit"] = self._DISCOVERY_PAGE_LIMIT
-                    params["offset"] = offset
-
-                    response_data = stream._fetch_with_retry(url, params)
-                    seriess = response_data.get("seriess", [])
-                    if not seriess:
-                        break
-                    series_ids.update(
-                        record["id"] for record in seriess if "id" in record
-                    )
-                    total += len(seriess)
-                    if len(seriess) < self._DISCOVERY_PAGE_LIMIT:
-                        break
-                    offset += self._DISCOVERY_PAGE_LIMIT
-                self.logger.debug(f"{label} {resource_id}: Found {total} series")
-            except requests.exceptions.RequestException as e:
-                self.logger.warning(
-                    f"Failed to get series for {label.lower()} {resource_id}: {e}"
-                )
-
     def _discover_all_series_ids(self) -> list[str]:
-        """Discover all FRED series IDs via releases and categories for completeness."""
-        series_ids: set[str] = set()
-
-        self._collect_series_ids_from_resource(
-            stream=ReleaseSeriesStream(self),
-            cached_items=self.get_cached_release_ids(),
-            resource_key="release_id",
-            label="Release",
-            series_ids=series_ids,
+        """Discover all FRED series IDs — delegates to tap_fred.discovery (single source of truth)."""
+        return discover_all_series_ids(
+            api_key=self.config["api_key"],
+            api_url=self.config["api_url"],
+            rate_limit_rpm=int(self.config.get("max_requests_per_minute", 60)),
         )
-        release_count = len(series_ids)
-        self.logger.info(f"Release-based discovery: {release_count} unique series")
-
-        self._collect_series_ids_from_resource(
-            stream=CategorySeriesStream(self),
-            cached_items=self.get_cached_category_ids(),
-            resource_key="category_id",
-            label="Category",
-            series_ids=series_ids,
-        )
-        self.logger.info(
-            f"Category-based discovery: {len(series_ids) - release_count} "
-            f"additional series not found via releases"
-        )
-
-        discovered_series = sorted(series_ids)
-        self.logger.info(f"Total unique series discovered: {len(discovered_series)}")
-        return discovered_series
 
     # Maps resource_type -> (cache_attr, lock_attr, config_key, id_key, data_key)
     _RESOURCE_ATTR_MAP = {
@@ -362,10 +314,9 @@ class TapFRED(Tap):
             with getattr(self, lock_attr):
                 cached_data = getattr(self, cache_attr)
                 if cached_data is None:
-                    config_ids = self.config.get(config_key, ["*"])
-                    # Belt-and-suspenders: normalize string to list
-                    if isinstance(config_ids, str):
-                        config_ids = [config_ids]
+                    config_ids = normalize_config_list(
+                        self.config.get(config_key, ["*"])
+                    )
 
                     if config_ids == ["*"]:
                         # Wildcard: use discovery stream
