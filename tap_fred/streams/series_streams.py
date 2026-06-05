@@ -70,6 +70,31 @@ class SeriesStream(SeriesBasedFREDStream):
             yield self.post_process(series, context)
 
 
+class SeriesIdsStream(FREDStream):
+    """Catalog of all resolved FRED series IDs - one row per series.
+
+    Emits the tap's resolved series-ID set directly (releases + categories
+    discovery for wildcard config, or the explicit ``series_ids`` list). Makes
+    no per-series API calls, so it never touches the WAF-throttled per-series
+    endpoints - the rows come straight from the discovery cache.
+    """
+
+    name = "series_ids"
+    path = ""
+    primary_keys: t.ClassVar[list[str]] = ["series_id"]
+    replication_key = None
+    _add_surrogate_key = False
+
+    schema = th.PropertiesList(
+        th.Property("series_id", th.StringType, description="FRED series identifier"),
+    ).to_dict()
+
+    def get_records(self, context: Context | None) -> t.Iterable[dict]:
+        """Yield one record per resolved series ID without any HTTP calls."""
+        for item in self._tap.get_cached_series_ids():
+            yield {"series_id": self._sanitize_resource_id(item["series_id"])}
+
+
 class SeriesObservationsStream(PointInTimePartitionStream):
     """Stream for FRED series observations (economic data points)."""
 

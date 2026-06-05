@@ -30,6 +30,7 @@ from tap_fred.streams.releases_streams import (
 )
 from tap_fred.streams.series_streams import (
     SeriesCategoriesStream,
+    SeriesIdsStream,
     SeriesObservationsStream,
     SeriesReleaseStream,
     SeriesSearchRelatedTagsStream,
@@ -58,6 +59,7 @@ from tap_fred.streams.tags_streams import (
 __all__ = [
     # Series streams
     "SeriesStream",
+    "SeriesIdsStream",
     "SeriesObservationsStream",
     "SeriesCategoriesStream",
     "SeriesReleaseStream",

@@ -33,6 +33,7 @@ from tap_fred.streams import (
     ReleaseTablesStream,
     ReleaseTagsStream,
     SeriesCategoriesStream,
+    SeriesIdsStream,
     SeriesObservationsStream,
     SeriesReleaseStream,
     SeriesSearchRelatedTagsStream,
@@ -398,6 +399,7 @@ class TapFRED(Tap):
             # Core data stream - series observations (economic data points)
             SeriesObservationsStream(self),
             # Series-related streams
+            SeriesIdsStream(self),
             SeriesStream(self),
             SeriesCategoriesStream(self),
             SeriesReleaseStream(self),
