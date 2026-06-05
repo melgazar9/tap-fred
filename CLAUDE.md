@@ -50,7 +50,7 @@ FREDStream (ABC, RESTStream)          # Core: rate limiting, retry, pagination, 
 - **tap.py** - `TapFRED` class: config schema, thread-safe resource ID caching (categories, releases, sources, tags, series, vintage dates), wildcard discovery via `_cache_resource_ids()`
 - **client.py** - All base stream classes, sliding window rate limiting (`_throttle`), exponential backoff retry (`_make_request`), pagination (`_paginate_records`)
 - **helpers.py** - `clean_json_keys()` (camelCase->snake_case), `generate_surrogate_key()`
-- **streams/** - 32 FRED API endpoint implementations across 6 domain files
+- **streams/** - 33 stream implementations across 6 domain files (32 FRED API endpoints + the synthetic `series_ids` catalog)
 
 ### Data Modes
 

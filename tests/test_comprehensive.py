@@ -97,15 +97,15 @@ class TestTapFREDComprehensive(unittest.TestCase):
             )
 
     def test_total_stream_count(self):
-        """Test that we have exactly 32 streams as documented."""
+        """Test that we have exactly 33 streams as documented."""
         config = {**self.base_config, "data_mode": "FRED"}
         tap = TapFRED(config=config)
 
         total_streams = len(tap.streams)
 
-        # Verify we have 32 streams total as documented in CLAUDE.md
+        # Verify we have 33 streams total as documented in CLAUDE.md
         self.assertEqual(
-            total_streams, 32, f"Expected 32 streams, but found {total_streams}"
+            total_streams, 33, f"Expected 33 streams, but found {total_streams}"
         )
 
     def test_schema_validation_series_observations(self):

@@ -15,8 +15,6 @@ def read_series_id_cache(cache_path: str, ttl_hours: float) -> list[str] | None:
     to re-discovery so a bad cache file can't fail every run.
     """
     try:
-        if not os.path.exists(cache_path):
-            return None
         age_hours = (time.time() - os.path.getmtime(cache_path)) / 3600
         if age_hours >= ttl_hours:
             return None
