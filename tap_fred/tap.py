@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import deque
 from threading import Lock
 
@@ -10,7 +11,11 @@ from singer_sdk import typing as th
 
 from tap_fred.client import FREDStream
 from tap_fred.discovery import discover_all_series_ids
-from tap_fred.helpers import normalize_config_list
+from tap_fred.helpers import (
+    normalize_config_list,
+    read_series_id_cache,
+    write_series_id_cache,
+)
 from tap_fred.streams import (
     CategoryChildrenStream,
     CategoryRelatedStream,
@@ -72,6 +77,28 @@ class TapFRED(Tap):
             th.OneOf(th.StringType, th.ArrayType(th.StringType)),
             required=True,
             description="FRED series IDs to replicate (e.g., 'GDP' or ['GDP', 'UNRATE'] or '*' for all)",
+        ),
+        th.Property(
+            "series_ids_catalog",
+            th.OneOf(th.StringType, th.ArrayType(th.StringType)),
+            description="Series IDs for the 'series_ids' catalog stream only. '*' emits the full "
+            "discovered catalog (all series); any other value (or unset) falls back to 'series_ids'. "
+            "Lets the catalog table cover every series while observations/vintage_dates stay scoped "
+            "to 'series_ids'.",
+        ),
+        th.Property(
+            "series_cache_path",
+            th.StringType,
+            description="Path to the on-disk discovery cache (the full series-ID list). Defaults to "
+            "'<MELTANO_PROJECT_ROOT or cwd>/.cache/fred_series_ids_cache.json'. The multi-hour "
+            "discovery walk runs once and all streams reuse this cache.",
+        ),
+        th.Property(
+            "series_cache_ttl_hours",
+            th.NumberType,
+            default=720.0,
+            description="Hours before the on-disk discovery cache is considered stale and the full "
+            "catalog is re-walked (default: 720 = 30 days).",
         ),
         th.Property(
             "start_date",
@@ -199,6 +226,10 @@ class TapFRED(Tap):
     _cached_series_ids: list[dict] | None = None
     _series_ids_lock = Lock()
 
+    # Full-catalog caching (all discovered series, independent of curated series_ids)
+    _cached_all_series_ids: list[str] | None = None
+    _all_series_ids_lock = Lock()
+
     # Vintage dates caching
     _cached_vintage_dates: list[dict] | None = None
     _vintage_dates_lock = Lock()
@@ -256,17 +287,72 @@ class TapFRED(Tap):
         """Return cached series IDs in consistent format [{'series_id': str}]."""
         return self._cache_resource_ids("series", SeriesStream(self))
 
+    def get_all_discovered_series_ids(self) -> list[str]:
+        """Full FRED catalog (all discovered series), independent of the curated series_ids config.
+
+        Used by the series_ids catalog stream when series_ids_catalog == ['*'] so the catalog table
+        can cover every series while observations/vintage_dates stay scoped to series_ids.
+        """
+        return self._discover_all_series_ids()
+
     def get_cached_vintage_dates(self):
         """Return cached vintage dates in consistent format [{'vintage_date': str}]."""
         return self._cache_resource_ids("vintage_date", SeriesVintageDatesStream(self))
 
+    def _series_cache_path(self) -> str:
+        """Resolve the on-disk discovery cache path.
+
+        Prefers MELTANO_SHARED_CACHE_DIR — the persistent, bind-mounted cache dir the
+        orchestration layer exports, because the project root it runs the tap under is a
+        throwaway temp dir. Falls back to a config override or '<project root or cwd>/.cache'.
+        Resolving here to the same dir the wrapper writes means both share one cache file.
+        """
+        configured = self.config.get("series_cache_path")
+        if configured:
+            return configured
+        cache_dir = os.environ.get("MELTANO_SHARED_CACHE_DIR") or os.path.join(
+            os.environ.get("MELTANO_PROJECT_ROOT") or os.getcwd(), ".cache"
+        )
+        return os.path.join(cache_dir, "fred_series_ids_cache.json")
+
     def _discover_all_series_ids(self) -> list[str]:
-        """Discover all FRED series IDs — delegates to tap_fred.discovery (single source of truth)."""
-        return discover_all_series_ids(
+        """Return all FRED series IDs, memoized in-process so the walk/disk-read runs once.
+
+        Both the catalog stream and the wildcard ``series`` cache call this; the shared
+        memo means the multi-hour walk (or the 17 MB cache read) happens a single time.
+        """
+        if self._cached_all_series_ids is None:
+            with self._all_series_ids_lock:
+                if self._cached_all_series_ids is None:
+                    self._cached_all_series_ids = self._load_or_discover_series_ids()
+        return self._cached_all_series_ids
+
+    def _load_or_discover_series_ids(self) -> list[str]:
+        """Load the catalog from the disk cache when fresh; otherwise walk and cache it.
+
+        Delegates the walk to tap_fred.discovery (the single source of truth). Caching is
+        best-effort: a missing/stale/unwritable cache never fails the run.
+        """
+        cache_path = self._series_cache_path()
+        ttl_hours = float(self.config.get("series_cache_ttl_hours", 720.0))
+
+        cached = read_series_id_cache(cache_path, ttl_hours)
+        if cached is not None:
+            self.logger.info(
+                f"Loaded {len(cached)} FRED series IDs from cache {cache_path}"
+            )
+            return cached
+
+        series_ids = discover_all_series_ids(
             api_key=self.config["api_key"],
             api_url=self.config["api_url"],
             rate_limit_rpm=int(self.config.get("max_requests_per_minute", 60)),
         )
+        write_series_id_cache(cache_path, series_ids)
+        self.logger.info(
+            f"Discovered {len(series_ids)} FRED series IDs; cached to {cache_path}"
+        )
+        return series_ids
 
     # Maps resource_type -> (cache_attr, lock_attr, config_key, id_key, data_key)
     _RESOURCE_ATTR_MAP = {

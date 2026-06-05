@@ -1,8 +1,44 @@
 """Helper functions for tap-fred."""
 
 import json
+import os
 import re
+import time
 import uuid
+
+
+def read_series_id_cache(cache_path: str, ttl_hours: float) -> list[str] | None:
+    """Best-effort read of a cached series-ID list.
+
+    Returns the cached list when present, non-empty, and younger than ``ttl_hours``;
+    otherwise None. Never raises — a missing/stale/corrupt cache just falls through
+    to re-discovery so a bad cache file can't fail every run.
+    """
+    try:
+        if not os.path.exists(cache_path):
+            return None
+        age_hours = (time.time() - os.path.getmtime(cache_path)) / 3600
+        if age_hours >= ttl_hours:
+            return None
+        with open(cache_path) as f:
+            cached = json.load(f)
+        return cached if isinstance(cached, list) and cached else None
+    except (OSError, ValueError):
+        return None
+
+
+def write_series_id_cache(cache_path: str, series_ids: list[str]) -> None:
+    """Best-effort write of a series-ID list.
+
+    Never raises — the cache is an optimization, so an unwritable dir must not
+    throw away a completed (multi-hour) discovery.
+    """
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w") as f:
+            json.dump(series_ids, f)
+    except OSError:
+        pass
 
 
 def to_snake_case(string: str) -> str:

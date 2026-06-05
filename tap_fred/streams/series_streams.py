@@ -12,7 +12,7 @@ from tap_fred.client import (
     PointInTimePartitionStream,
     SeriesBasedFREDStream,
 )
-from tap_fred.helpers import join_tag_names
+from tap_fred.helpers import join_tag_names, normalize_config_list
 
 
 class SeriesStream(SeriesBasedFREDStream):
@@ -71,12 +71,15 @@ class SeriesStream(SeriesBasedFREDStream):
 
 
 class SeriesIdsStream(FREDStream):
-    """Catalog of all resolved FRED series IDs - one row per series.
+    """Catalog of FRED series IDs - one row per series.
 
-    Emits the tap's resolved series-ID set directly (releases + categories
-    discovery for wildcard config, or the explicit ``series_ids`` list). Makes
-    no per-series API calls, so it never touches the WAF-throttled per-series
-    endpoints - the rows come straight from the discovery cache.
+    Scope is set by the ``series_ids_catalog`` config, independent of the curated
+    ``series_ids`` used by the data streams:
+    - ``series_ids_catalog == ['*']`` -> the full discovered catalog (all series).
+    - otherwise (or unset) -> the curated ``series_ids`` selection.
+
+    Makes no per-series API calls; the wildcard path uses the releases + categories
+    discovery, so it never touches the WAF-throttled per-series endpoints.
     """
 
     name = "series_ids"
@@ -90,9 +93,15 @@ class SeriesIdsStream(FREDStream):
     ).to_dict()
 
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
-        """Yield one record per resolved series ID without any HTTP calls."""
-        for item in self._tap.get_cached_series_ids():
-            yield {"series_id": self._sanitize_resource_id(item["series_id"])}
+        """Yield one record per series ID; full catalog or curated set per config."""
+        if normalize_config_list(self.config.get("series_ids_catalog") or []) == ["*"]:
+            series_ids = self._tap.get_all_discovered_series_ids()
+        else:
+            series_ids = (
+                item["series_id"] for item in self._tap.get_cached_series_ids()
+            )
+        for series_id in series_ids:
+            yield {"series_id": self._sanitize_resource_id(series_id)}
 
 
 class SeriesObservationsStream(PointInTimePartitionStream):
