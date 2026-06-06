@@ -50,10 +50,6 @@ def to_snake_case(string: str) -> str:
     return string.strip("_")
 
 
-# Backwards-compatible alias
-clean_strings = to_snake_case
-
-
 def clean_json_keys(data):
     """Recursively convert all JSON keys to snake_case."""
     if isinstance(data, dict):
