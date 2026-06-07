@@ -129,6 +129,15 @@ class TapFRED(Tap):
             description="Minimum seconds between consecutive API requests (default: 1.0 for 60/min rate)",
         ),
         th.Property(
+            "throttle_jitter_seconds",
+            th.NumberType,
+            default=1.0,
+            description=(
+                "Max random buffer (seconds) added before EVERY API call, on top of the min "
+                "interval. FRED is strict; jitter de-periodizes the stream and de-syncs concurrent keys."
+            ),
+        ),
+        th.Property(
             "category_ids",
             th.ArrayType(th.StringType),
             description="Specific category IDs to process (e.g., ['125', '13'] or ['*'] for all)",
@@ -347,6 +356,7 @@ class TapFRED(Tap):
             api_key=self.config["api_key"],
             api_url=self.config["api_url"],
             rate_limit_rpm=int(self.config.get("max_requests_per_minute", 60)),
+            jitter_seconds=float(self.config.get("throttle_jitter_seconds", 1.0)),
         )
         write_series_id_cache(cache_path, series_ids)
         self.logger.info(

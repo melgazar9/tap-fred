@@ -33,6 +33,11 @@ class FREDStream(RESTStream, ABC):
             self.config.get("max_requests_per_minute", 60)
         )
         self._min_interval = float(self.config.get("min_throttle_seconds", 1.0))
+        # Random buffer (0..jitter seconds) applied before EVERY call (FRED is strict).
+        # Clamped to >= 0 so a misconfigured negative value can't produce a negative sleep.
+        self._jitter_seconds = max(
+            float(self.config.get("throttle_jitter_seconds", 1.0)), 0.0
+        )
         # Use shared rate limiter from tap so all streams respect the same budget
         self._throttle_lock = tap._shared_throttle_lock
         self._request_timestamps = tap._shared_request_timestamps
@@ -88,7 +93,8 @@ class FREDStream(RESTStream, ABC):
         1. Tracks request timestamps in a sliding 60-second window
         2. Removes old requests outside the window
         3. Waits if we've hit the rate limit
-        4. Also enforces minimum interval between requests
+        4. Enforces a minimum interval between requests plus an always-on random
+           jitter buffer before every call (FRED is strict on rate limits)
         """
         with self._throttle_lock:
             now = time.time()
@@ -109,16 +115,21 @@ class FREDStream(RESTStream, ABC):
                     logging.info(
                         f"Rate limit reached ({self._max_requests_per_minute}/min). Waiting {wait_time:.1f}s"
                     )
-                    time.sleep(wait_time + random.uniform(0.1, 0.5))  # Add small jitter
+                    time.sleep(wait_time + random.uniform(0, self._jitter_seconds))
                     now = time.time()
 
-            # Also enforce minimum interval between consecutive requests
+            # Min interval between consecutive calls + an always-on random buffer before
+            # EVERY call (FRED is strict). Folded into one sleep so jitter isn't double-applied;
+            # the jitter fires even when requests are naturally spaced past the min interval.
+            min_wait = 0.0
             if self._request_timestamps:
-                last_request = self._request_timestamps[-1]
-                min_wait = last_request + self._min_interval - now
-                if min_wait > 0:
-                    time.sleep(min_wait + random.uniform(0, 0.1))
-                    now = time.time()
+                min_wait = max(
+                    self._request_timestamps[-1] + self._min_interval - now, 0.0
+                )
+            buffer = min_wait + random.uniform(0, self._jitter_seconds)
+            if buffer > 0:
+                time.sleep(buffer)
+                now = time.time()
 
             # Record this request timestamp
             self._request_timestamps.append(now)

@@ -38,29 +38,51 @@ def _redact_url(url: str) -> str:
     return re.sub(r"(api_key=)[^&]+", r"\1<REDACTED>", url)
 
 
+class Throttle:
+    """Paces FRED API calls for a single key.
+
+    Sleeps before every call: a fixed ``min_interval`` between calls plus a random
+    ``[0, jitter_seconds]`` buffer before each one. FRED is strict on rate limits;
+    the jitter de-periodizes the request stream and de-syncs concurrent keys so a
+    fleet of workers never hits the API in lockstep.
+    """
+
+    def __init__(self, min_interval: float, jitter_seconds: float = 0.0) -> None:
+        self.min_interval = max(min_interval, 0.0)
+        self.jitter_seconds = max(jitter_seconds, 0.0)
+        self.calls = 0
+
+    def wait(self) -> None:
+        """Sleep the pacing delay, then count the call. Jitter applies before every call;
+        the min interval applies only between calls (not before the first)."""
+        delay = random.uniform(0.0, self.jitter_seconds)
+        if self.calls > 0:
+            delay += self.min_interval
+        if delay > 0:
+            time.sleep(delay)
+        self.calls += 1
+
+
 def _fred_get(
     api_url: str,
     endpoint: str,
     params: dict,
     api_key: str,
-    min_interval: float,
-    _state: dict,
+    throttle: Throttle,
 ) -> dict:
-    """Single FRED API GET with rate limiting and retry."""
+    """Single FRED API GET with a jittered pre-call buffer and retry."""
     params = {**params, "api_key": api_key, "file_type": "json"}
     url = f"{api_url}/{endpoint}?{urllib.parse.urlencode(params)}"
     safe_url = _redact_url(url)
 
-    # Rate limiting
-    if _state["request_count"] > 0:
-        time.sleep(min_interval)
+    # Jittered buffer before every call (FRED is strict on rate limits).
+    throttle.wait()
 
     for attempt in range(4):
         try:
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
-            _state["request_count"] += 1
             return data
         except urllib.error.HTTPError as e:
             if e.code == 429:
@@ -94,8 +116,7 @@ def _paginate_series(
     resource_key: str,
     resource_id,
     api_key: str,
-    min_interval: float,
-    state: dict,
+    throttle: Throttle,
 ) -> set[str]:
     """Paginate an endpoint that returns seriess[], collecting series IDs."""
     ids: set[str] = set()
@@ -106,8 +127,7 @@ def _paginate_series(
             endpoint,
             {resource_key: resource_id, "limit": _PAGE_LIMIT, "offset": offset},
             api_key,
-            min_interval,
-            state,
+            throttle,
         )
         seriess = data.get("seriess", [])
         if not seriess:
@@ -137,8 +157,7 @@ class DiscoveryIncompleteError(RuntimeError):
 def _discover_via_releases(
     api_url: str,
     api_key: str,
-    min_interval: float,
-    state: dict,
+    throttle: Throttle,
 ) -> tuple[set[str], list[dict]]:
     """Phase 1: releases -> release/series. Returns (series_ids, failures)."""
     release_ids = []
@@ -149,8 +168,7 @@ def _discover_via_releases(
             "releases",
             {"limit": _PAGE_LIMIT, "offset": offset},
             api_key,
-            min_interval,
-            state,
+            throttle,
         )
         releases = data.get("releases", [])
         if not releases:
@@ -171,8 +189,7 @@ def _discover_via_releases(
                 "release_id",
                 rid,
                 api_key,
-                min_interval,
-                state,
+                throttle,
             )
         except Exception as e:
             logger.error(f"Failed to get series for release {rid}: {e}")
@@ -190,8 +207,7 @@ def _discover_via_releases(
 def _discover_via_categories(
     api_url: str,
     api_key: str,
-    min_interval: float,
-    state: dict,
+    throttle: Throttle,
 ) -> tuple[set[str], list[dict]]:
     """Phase 2: BFS category tree -> category/series. Returns (series_ids, failures)."""
     visited: set[int] = set()
@@ -210,8 +226,7 @@ def _discover_via_categories(
                 "category/children",
                 {"category_id": cat_id},
                 api_key,
-                min_interval,
-                state,
+                throttle,
             )
         except Exception as e:
             logger.error(f"Failed to fetch children for category {cat_id}: {e}")
@@ -237,8 +252,7 @@ def _discover_via_categories(
                 "category_id",
                 cid,
                 api_key,
-                min_interval,
-                state,
+                throttle,
             )
         except Exception as e:
             logger.error(f"Failed to get series for category {cid}: {e}")
@@ -257,6 +271,7 @@ def discover_all_series_ids(
     api_key: str,
     api_url: str = "https://api.stlouisfed.org/fred",
     rate_limit_rpm: int = 60,
+    jitter_seconds: float = 1.0,
 ) -> list[str]:
     """Discover all FRED series IDs via releases and categories.
 
@@ -275,7 +290,10 @@ def discover_all_series_ids(
     api_url : str
         FRED API base URL.
     rate_limit_rpm : int
-        Max requests per minute (default 60).
+        Max requests per minute (default 60); sets the min interval between calls.
+    jitter_seconds : float
+        Max random buffer (seconds) added before every call on top of the min interval.
+        FRED is strict, so jitter de-periodizes the stream and de-syncs concurrent keys.
 
     Returns
     -------
@@ -287,22 +305,19 @@ def discover_all_series_ids(
     DiscoveryIncompleteError
         If any resource could not be fetched after retries.
     """
-    min_interval = 60.0 / max(rate_limit_rpm, 1)
-    state = {"request_count": 0}
+    throttle = Throttle(
+        min_interval=60.0 / max(rate_limit_rpm, 1), jitter_seconds=jitter_seconds
+    )
 
     logger.info("Discovering FRED series IDs via releases + categories...")
 
     # Phase 1: releases
-    series_ids, release_failures = _discover_via_releases(
-        api_url, api_key, min_interval, state
-    )
+    series_ids, release_failures = _discover_via_releases(api_url, api_key, throttle)
     release_count = len(series_ids)
     logger.info(f"Release-based discovery: {release_count} unique series")
 
     # Phase 2: categories
-    cat_ids, cat_failures = _discover_via_categories(
-        api_url, api_key, min_interval, state
-    )
+    cat_ids, cat_failures = _discover_via_categories(api_url, api_key, throttle)
     new_from_categories = len(cat_ids - series_ids)
     series_ids |= cat_ids
     logger.info(
@@ -316,7 +331,7 @@ def discover_all_series_ids(
 
     result = sorted(series_ids)
     logger.info(
-        f"Total unique series discovered: {len(result)} ({state['request_count']} API requests)"
+        f"Total unique series discovered: {len(result)} ({throttle.calls} API requests)"
     )
     return result
 
@@ -344,6 +359,12 @@ def main() -> None:
         default=60,
         help="Max requests per minute (default: 60)",
     )
+    parser.add_argument(
+        "--jitter-seconds",
+        type=float,
+        default=float(os.environ.get("TAP_FRED_THROTTLE_JITTER_SECONDS", "1.0")),
+        help="Max random buffer (seconds) before every call (default: $TAP_FRED_THROTTLE_JITTER_SECONDS or 1.0)",
+    )
     args = parser.parse_args()
 
     if not args.api_key:
@@ -360,6 +381,7 @@ def main() -> None:
             api_key=args.api_key,
             api_url=args.api_url,
             rate_limit_rpm=args.rate_limit_rpm,
+            jitter_seconds=args.jitter_seconds,
         )
     except DiscoveryIncompleteError as e:
         logger.error(str(e))
