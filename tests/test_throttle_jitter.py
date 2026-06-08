@@ -10,7 +10,10 @@ These run fully offline (urlopen / time.sleep / random mocked).
 
 from __future__ import annotations
 
+import urllib.error
 from unittest import mock
+
+import pytest
 
 from tap_fred import discovery
 from tap_fred.discovery import Throttle
@@ -69,6 +72,59 @@ class TestDiscoveryThrottle:
 
         # a sleep precedes each urlopen, and the buffer grows once the min interval kicks in
         assert order == [("sleep", 0.1), ("call", None), ("sleep", 0.6), ("call", None)]
+
+
+class TestFredGetThrottleRetry:
+    """FRED rate-limits with 403 as well as 429 — _fred_get must back off and retry both."""
+
+    @staticmethod
+    def _ok_resp():
+        resp = mock.MagicMock()
+        resp.read.return_value = b'{"ok": 1}'
+        resp.__enter__.return_value = resp
+        return resp
+
+    @staticmethod
+    def _http_error(code):
+        return urllib.error.HTTPError("https://api/x", code, "err", {}, None)
+
+    def test_403_retries_then_succeeds(self):
+        throttle = Throttle(min_interval=0.0, jitter_seconds=0.0)
+        seq = [self._http_error(403), self._http_error(403), self._ok_resp()]
+        with (
+            mock.patch.object(discovery.time, "sleep") as sleep,
+            mock.patch.object(discovery.urllib.request, "urlopen", side_effect=seq),
+        ):
+            out = discovery._fred_get("https://api", "releases", {}, "key", throttle)
+        assert out == {"ok": 1}
+        assert sleep.call_count == 2  # two backoffs before the success
+
+    def test_persistent_403_raises_after_max_attempts(self):
+        throttle = Throttle(min_interval=0.0, jitter_seconds=0.0)
+        with (
+            mock.patch.object(discovery.time, "sleep") as sleep,
+            mock.patch.object(
+                discovery.urllib.request, "urlopen", side_effect=self._http_error(403)
+            ),
+        ):
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                discovery._fred_get(
+                    "https://api", "releases", {}, "key", throttle, max_attempts=3
+                )
+        assert exc.value.code == 403
+        assert sleep.call_count == 2  # backs off on attempts 0 and 1, raises on the 3rd
+
+    def test_non_throttle_4xx_raises_immediately(self):
+        throttle = Throttle(min_interval=0.0, jitter_seconds=0.0)
+        with (
+            mock.patch.object(discovery.time, "sleep") as sleep,
+            mock.patch.object(
+                discovery.urllib.request, "urlopen", side_effect=self._http_error(400)
+            ),
+        ):
+            with pytest.raises(urllib.error.HTTPError):
+                discovery._fred_get("https://api", "releases", {}, "key", throttle)
+        assert sleep.call_count == 0  # a 400 is not retried
 
 
 class TestStreamThrottleJitter:

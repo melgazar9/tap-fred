@@ -69,8 +69,16 @@ def _fred_get(
     params: dict,
     api_key: str,
     throttle: Throttle,
+    max_attempts: int = 5,
 ) -> dict:
-    """Single FRED API GET with a jittered pre-call buffer and retry."""
+    """Single FRED API GET with a jittered pre-call buffer and retry.
+
+    FRED rate-limits a heavy walk with 403 *as well as* 429, so both are treated as
+    retryable throttle signals: wait out FRED's ~60s window and retry. A 403/429 that
+    survives ``max_attempts`` is re-raised (genuinely forbidden, or a sustained block)
+    so discovery still fails closed instead of returning partial/empty data. Other 4xx
+    raise immediately; 5xx and network errors back off exponentially.
+    """
     params = {**params, "api_key": api_key, "file_type": "json"}
     url = f"{api_url}/{endpoint}?{urllib.parse.urlencode(params)}"
     safe_url = _redact_url(url)
@@ -78,36 +86,41 @@ def _fred_get(
     # Jittered buffer before every call (FRED is strict on rate limits).
     throttle.wait()
 
-    for attempt in range(4):
+    for attempt in range(max_attempts):
+        last = attempt == max_attempts - 1
         try:
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
             return data
         except urllib.error.HTTPError as e:
-            if e.code == 429:
-                wait = 60 + random.uniform(1, 5)
-                logger.warning("Rate limited (429) on %s, waiting %ds", safe_url, wait)
-                time.sleep(wait)
-                continue
-            if e.code >= 500 and attempt < 3:
-                wait = (2**attempt) * 5 + random.uniform(0, 2)
-                logger.warning(
-                    "Server error %d on %s, retrying in %ds", e.code, safe_url, wait
-                )
-                time.sleep(wait)
-                continue
-            raise
+            throttled = e.code in (403, 429)
+            if (not throttled and e.code < 500) or last:
+                raise  # non-retryable 4xx, or retries exhausted -> fail closed
+            # Throttle (403/429): wait out FRED's per-minute window. 5xx: exponential.
+            wait = (
+                60 + random.uniform(1, 5)
+                if throttled
+                else (2**attempt) * 5 + random.uniform(0, 2)
+            )
+            logger.warning(
+                "Retryable %d on %s, waiting %.0fs (attempt %d/%d)",
+                e.code,
+                safe_url,
+                wait,
+                attempt + 1,
+                max_attempts,
+            )
+            time.sleep(wait)
         except (urllib.error.URLError, TimeoutError) as e:
-            if attempt < 3:
-                wait = (2**attempt) * 5
-                logger.warning(
-                    "Request failed on %s (%s), retrying in %ds", safe_url, e, wait
-                )
-                time.sleep(wait)
-                continue
-            raise
-    return {}
+            if last:
+                raise
+            wait = (2**attempt) * 5
+            logger.warning(
+                "Request failed on %s (%s), retrying in %.0fs", safe_url, e, wait
+            )
+            time.sleep(wait)
+    return {}  # unreachable: final attempt always returns or raises
 
 
 def _paginate_series(
