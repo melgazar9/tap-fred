@@ -69,15 +69,17 @@ def _fred_get(
     params: dict,
     api_key: str,
     throttle: Throttle,
-    max_attempts: int = 5,
+    max_attempts: int = 8,
 ) -> dict:
     """Single FRED API GET with a jittered pre-call buffer and retry.
 
     FRED rate-limits a heavy walk with 403 *as well as* 429, so both are treated as
-    retryable throttle signals: wait out FRED's ~60s window and retry. A 403/429 that
-    survives ``max_attempts`` is re-raised (genuinely forbidden, or a sustained block)
-    so discovery still fails closed instead of returning partial/empty data. Other 4xx
-    raise immediately; 5xx and network errors back off exponentially.
+    retryable throttle signals with escalating backoff (60s, 120s, 240s, … capped at
+    300s) — enough patience (~25min over the default attempts) to ride out sustained
+    throttling. A 403/429 that still survives ``max_attempts`` is re-raised (genuinely
+    forbidden, or a real outage) so discovery fails closed and surfaces it rather than
+    returning partial/empty data. Other 4xx raise immediately; 5xx and network errors
+    back off exponentially.
     """
     params = {**params, "api_key": api_key, "file_type": "json"}
     url = f"{api_url}/{endpoint}?{urllib.parse.urlencode(params)}"
@@ -97,9 +99,10 @@ def _fred_get(
             throttled = e.code in (403, 429)
             if (not throttled and e.code < 500) or last:
                 raise  # non-retryable 4xx, or retries exhausted -> fail closed
-            # Throttle (403/429): wait out FRED's per-minute window. 5xx: exponential.
+            # Throttle (403/429): escalating backoff capped at 300s to ride out sustained
+            # rate-limiting. 5xx: shorter exponential.
             wait = (
-                60 + random.uniform(1, 5)
+                min(300.0, 60 * (2**attempt)) + random.uniform(1, 5)
                 if throttled
                 else (2**attempt) * 5 + random.uniform(0, 2)
             )
