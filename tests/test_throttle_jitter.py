@@ -14,6 +14,7 @@ import urllib.error
 from unittest import mock
 
 import pytest
+import requests
 
 from tap_fred import discovery
 from tap_fred.discovery import Throttle
@@ -168,3 +169,61 @@ class TestStreamThrottleJitter:
             stream._throttle()
             stream._throttle()
         assert sleep.call_count == 0
+
+
+class TestStreamRetriesOn403:
+    """FRED throttles the streams with 403 (not just 429); the requests-based client must
+    retry it like a rate-limit, not treat it as a fatal/skip error."""
+
+    @staticmethod
+    def _stream():
+        cfg = {
+            "api_key": "dummy",
+            "api_url": "https://api.stlouisfed.org/fred",
+            "max_requests_per_minute": 100000,
+            "min_throttle_seconds": 0.0,
+            "throttle_jitter_seconds": 0.0,
+            "series_ids": ["GDP"],
+            "strict_mode": True,
+        }
+        return TapFRED(config=cfg, validate_config=False).streams["series_observations"]
+
+    @staticmethod
+    def _resp(status, json_data=None):
+        resp = mock.MagicMock()
+        resp.status_code = status
+        resp.reason = "Forbidden"
+        resp.text = ""
+        if status >= 400:
+            resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+                response=resp
+            )
+        else:
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = json_data or {}
+        return resp
+
+    def test_403_retried_then_succeeds(self):
+        stream = self._stream()
+        seq = [self._resp(403), self._resp(403), self._resp(200, {"observations": []})]
+        with (
+            mock.patch("time.sleep"),
+            mock.patch.object(stream.requests_session, "get", side_effect=seq) as get,
+        ):
+            out = stream._make_request("https://api/x", {"api_key": "dummy"})
+        assert out == {"observations": []}
+        assert get.call_count == 3  # two 403s ridden through, then success
+
+    def test_400_not_retried(self):
+        stream = self._stream()
+        with (
+            mock.patch("time.sleep"),
+            mock.patch.object(
+                stream.requests_session,
+                "get",
+                side_effect=lambda *a, **k: self._resp(400),
+            ) as get,
+        ):
+            with pytest.raises(requests.exceptions.HTTPError):
+                stream._make_request("https://api/x", {"api_key": "dummy"})
+        assert get.call_count == 1  # a genuine 400 is fatal, no retry

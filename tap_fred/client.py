@@ -141,19 +141,14 @@ class FREDStream(RESTStream, ABC):
         max_value=300,
         jitter=backoff.full_jitter,
         max_tries=5,
-        max_time=300,  # Allow enough time for 429 rate-limit recovery (60s waits)
+        max_time=300,  # Allow enough time for 403/429 throttle recovery (60s waits)
         giveup=lambda e: (
-            # Give up on HTTP errors except for specific retryable ones
+            # Retry throttling (FRED throttles with 403 as well as 429) and transient
+            # 5xx; give up on every other HTTP error. Non-HTTP RequestExceptions
+            # (timeouts, connection resets) fall through to retry.
             isinstance(e, requests.exceptions.HTTPError)
             and e.response is not None
-            and (
-                400 <= e.response.status_code <= 599  # Give up on all HTTP errors
-                and e.response.status_code != 429  # Except rate limits
-                and e.response.status_code != 500  # Except internal server error
-                and e.response.status_code != 502  # Except bad gateway
-                and e.response.status_code != 503  # Except service unavailable
-                and e.response.status_code != 504  # Except gateway timeout
-            )
+            and e.response.status_code not in {403, 429, 500, 502, 503, 504}
         ),
         on_backoff=lambda details: logging.warning(
             f"API request failed, retrying in {details['wait']:.1f}s "
@@ -224,13 +219,16 @@ class FREDStream(RESTStream, ABC):
                     time.sleep(60)
                     raise e
 
-                if status_code >= 500:
+                # FRED throttles with 403 as well as 429; 5xx is transient. Re-raise so
+                # backoff retries (its giveup permits these) instead of mis-classifying the
+                # throttle as a missing-data partition to skip.
+                if status_code == 403 or status_code >= 500:
                     logging.warning(
-                        f"Server error {status_code} for {redacted_url}, will retry if attempts remain"
+                        f"Retryable error {status_code} for {redacted_url}, will retry if attempts remain"
                     )
                     raise e
 
-                # Non-retryable client errors (400-499 except 429)
+                # Non-retryable client errors (400-499 except 403/429)
                 response_body = e.response.text[:200] if e.response.text else "no body"
                 logging.warning(
                     f"Client error {status_code} for {redacted_url}: "
