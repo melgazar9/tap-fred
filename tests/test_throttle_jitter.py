@@ -214,6 +214,19 @@ class TestStreamRetriesOn403:
         assert out == {"observations": []}
         assert get.call_count == 3  # two 403s ridden through, then success
 
+    def test_403_waits_full_rate_window_before_retry(self):
+        """A 403 is FRED's throttle over a rolling 60s window — retrying sooner just hits
+        the same wall, so each 403 must sleep the full window before backoff retries."""
+        stream = self._stream()
+        seq = [self._resp(403), self._resp(200, {"observations": []})]
+        with (
+            mock.patch("time.sleep") as sleep,
+            mock.patch.object(stream.requests_session, "get", side_effect=seq),
+        ):
+            stream._make_request("https://api/x", {"api_key": "dummy"})
+        window = stream._RATE_LIMIT_WINDOW_SECONDS
+        assert any(c.args and c.args[0] == window for c in sleep.call_args_list)
+
     def test_400_not_retried(self):
         stream = self._stream()
         with (

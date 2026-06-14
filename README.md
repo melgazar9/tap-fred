@@ -219,7 +219,7 @@ The tap uses a sliding window rate limiter shared across all streams. Default: 6
 
 ### Retry Logic
 
-Automatic exponential backoff (5s–300s) with jitter on retriable errors: 429 (rate limit), 500, 502, 503, 504.
+Automatic retry on retriable errors. FRED throttles with both **403 and 429** over a rolling 60s window per key, so on either the tap waits the full 60s window before retrying (a short backoff just hits the same wall). Transient server errors (500, 502, 503, 504) use exponential backoff (5s–420s) with jitter.
 
 ### Chunked Backfills
 

@@ -26,6 +26,9 @@ class FREDStream(RESTStream, ABC):
     rest_method = "GET"
     _add_surrogate_key = False
     _paginate = False  # Set to True in streams that need pagination
+    # FRED throttles per API key over a rolling 60s window; on a throttle (403/429)
+    # retry only after the full window clears, or a short backoff just hits the same wall.
+    _RATE_LIMIT_WINDOW_SECONDS: t.ClassVar[int] = 60
 
     def __init__(self, tap) -> None:
         super().__init__(tap)
@@ -140,8 +143,8 @@ class FREDStream(RESTStream, ABC):
         base=5,
         max_value=300,
         jitter=backoff.full_jitter,
-        max_tries=5,
-        max_time=300,  # Allow enough time for 403/429 throttle recovery (60s waits)
+        max_tries=6,
+        max_time=420,  # Room for several 60s rate-window waits (403/429) under strict_mode
         giveup=lambda e: (
             # Retry throttling (FRED throttles with 403 as well as 429) and transient
             # 5xx; give up on every other HTTP error. Non-HTTP RequestExceptions
@@ -210,21 +213,23 @@ class FREDStream(RESTStream, ABC):
             if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
                 status_code = e.response.status_code
 
-                if status_code == 429:
-                    # Rate limited — wait for FRED's 60-second window to reset, then retry
+                # FRED throttles with BOTH 403 and 429 over a rolling 60s window per key.
+                # A short exponential backoff just hits the still-full window, so wait the
+                # whole window before backoff retries. Re-raise so backoff (its giveup
+                # permits these) retries instead of mis-classifying the throttle as a
+                # missing-data partition to skip.
+                if status_code in (403, 429):
                     logging.warning(
-                        f"Rate limited (429) for {redacted_url}. "
-                        f"Waiting 60s for rate window to reset."
+                        f"Rate limited ({status_code}) for {redacted_url}. "
+                        f"Waiting {self._RATE_LIMIT_WINDOW_SECONDS}s for the rate window to reset."
                     )
-                    time.sleep(60)
+                    time.sleep(self._RATE_LIMIT_WINDOW_SECONDS)
                     raise e
 
-                # FRED throttles with 403 as well as 429; 5xx is transient. Re-raise so
-                # backoff retries (its giveup permits these) instead of mis-classifying the
-                # throttle as a missing-data partition to skip.
-                if status_code == 403 or status_code >= 500:
+                # Transient server errors — backoff's exponential delay handles these.
+                if status_code >= 500:
                     logging.warning(
-                        f"Retryable error {status_code} for {redacted_url}, will retry if attempts remain"
+                        f"Retryable server error {status_code} for {redacted_url}, will retry if attempts remain"
                     )
                     raise e
 
