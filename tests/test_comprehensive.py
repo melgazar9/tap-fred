@@ -119,14 +119,14 @@ class TestTapFREDComprehensive(unittest.TestCase):
 
         self.assertIsNotNone(series_obs_stream, "series_observations stream not found")
 
-        # Check schema has required fields
+        # Check schema has required fields (compact bitemporal: realtime_end is derived
+        # in SQL, not stored, so it must NOT be present).
         schema_properties = series_obs_stream.schema.get("properties", {})
         required_fields = {
             "series_id",
             "date",
             "value",
             "realtime_start",
-            "realtime_end",
         }
 
         for field in required_fields:
@@ -135,6 +135,7 @@ class TestTapFREDComprehensive(unittest.TestCase):
                 schema_properties,
                 f"Required field '{field}' missing from schema",
             )
+        self.assertNotIn("realtime_end", schema_properties)
 
     def test_incremental_replication_key(self):
         """Test that incremental streams have proper replication keys."""
@@ -283,12 +284,12 @@ class TestTapFREDComprehensive(unittest.TestCase):
 
         schema_props = series_obs_stream.schema.get("properties", {})
 
-        # Test specific field types
+        # Test specific field types (realtime_end is derived in SQL, not stored)
         self.assertIn("type", schema_props.get("series_id", {}))
         self.assertIn("type", schema_props.get("date", {}))
         self.assertIn("type", schema_props.get("value", {}))
         self.assertIn("type", schema_props.get("realtime_start", {}))
-        self.assertIn("type", schema_props.get("realtime_end", {}))
+        self.assertNotIn("realtime_end", schema_props)
 
 
 if __name__ == "__main__":

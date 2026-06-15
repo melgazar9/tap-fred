@@ -769,188 +769,213 @@ class TagBasedFREDStream(FREDStream):
 
 
 class PointInTimePartitionStream(FREDStream):
-    """Base class for streams with point-in-time vintage date partitioning.
+    """Base class for point-in-time (ALFRED) streams.
 
-    Handles the common pattern of:
-    1. Getting resource IDs (series_ids, category_ids, etc.)
-    2. Getting revision dates for each resource ID
-    3. Creating partitions for each (resource_id, vintage_date) combination
+    One partition per resource (stable incremental bookmark on ``realtime_start``).
+    A resource's full vintage history is pulled with REALTIME-RANGE requests chunked
+    at <= ``MAX_VINTAGES_PER_REQUEST`` vintages — FRED rejects a request whose realtime
+    window spans more vintages than that. Each chunk uses the default output type, which
+    returns FRED's compact revision history — ``(date, value, realtime_start,
+    realtime_end)`` rows — landed 1:1 (no per-vintage expansion).
+
+    "As of vintage V" is a downstream read (``realtime_start <= V``, latest wins), not a
+    materialized per-vintage snapshot: identical point-in-time data, ~1000x less storage,
+    a few hundred requests instead of one-per-vintage. The compact rows are leakage-safe
+    by construction — every value carries the realtime window it was current for, so
+    nothing is ever attributed to a vintage before it was published.
     """
 
     # Subclasses must define these attributes
     _resource_type: str = None  # e.g., "series", "category", "release"
     _resource_id_key: str = None  # e.g., "series_id", "category_id", "release_id"
 
+    # FRED rejects an observations request whose realtime window spans more vintage
+    # dates than this ("...exceeds the maximum number of vintage dates allowed for
+    # this file type (2000)").
+    MAX_VINTAGES_PER_REQUEST: t.ClassVar[int] = 2000
+
     @property
     def partitions(self):
-        """Return partitions based on resource IDs and vintage dates (if point-in-time mode)."""
+        """One partition per resource id (each keeps its own realtime_start bookmark)."""
         cache_method = getattr(self._tap, f"get_cached_{self._resource_type}_ids")
         resource_ids = cache_method()
         if not resource_ids:
             return []
         if isinstance(resource_ids[0], dict):
-            # Extract the ID from dict format
             resource_ids = [item[self._resource_id_key] for item in resource_ids]
-
-        # Check if point-in-time mode is enabled
-        point_in_time_mode = self.config.get("point_in_time_mode", False)
-        if not point_in_time_mode:
-            # Standard resource-based partitions
-            return [
-                {self._resource_id_key: resource_id} for resource_id in resource_ids
-            ]
-
-        # Point-in-time mode: create partitions for each (resource_id, vintage_date)
-        partitions = []
-        for resource_id in resource_ids:
-            vintage_dates = self._get_vintage_dates_for_resource(resource_id)
-
-            if not vintage_dates:
-                # SKIP — never fall back to current data in point-in-time mode.
-                # Falling back would silently introduce today's revised data into
-                # a vintage dataset, contaminating backtesting results.
-                self.logger.warning(
-                    f"Skipping {self._resource_id_key}='{resource_id}' — no vintage "
-                    f"dates in point-in-time range "
-                    f"[{self.config.get('point_in_time_start', 'unbounded')}, "
-                    f"{self.config.get('point_in_time_end', 'unbounded')}]. "
-                    f"Will NOT fall back to current data (prevents data leakage)."
-                )
-                continue
-            # Create partition for each vintage date
-            for vintage_date in vintage_dates:
-                partitions.append(
-                    {
-                        self._resource_id_key: resource_id,
-                        "vintage_date": vintage_date,
-                    }
-                )
-        return partitions
+        return [{self._resource_id_key: rid} for rid in resource_ids]
 
     def _get_vintage_dates_for_resource(self, resource_id: str) -> list[str]:
-        """Get vintage dates for a specific resource ID using proper API-based caching.
-
-        IMPORTANT: This uses generic "resource_id" field, not hardcoded "series_id".
-        Works for ANY resource type (series, categories, releases, etc.) that has vintage dates.
-        """
-        # Use the tap's consistent caching pattern for vintage dates
+        """Sorted vintage dates for one resource, filtered to the configured PIT window."""
         cached_vintage_dates = self._tap.get_cached_vintage_dates()
-
-        # Filter vintage dates for THIS specific resource only (avoid cross-product)
-        # Uses generic "resource_id" field from cache, not hardcoded "series_id"
         vintage_dates = [
             item["vintage_date"]
             for item in cached_vintage_dates
             if item.get("resource_id") == resource_id
         ]
 
-        # Apply point_in_time_start and point_in_time_end filtering
+        # Normalize the PIT bounds to date-only (YYYY-MM-DD). The settings are
+        # date_iso8601, but a value carrying a time component ('2020-01-01T00:00:00')
+        # would lexically compare GREATER than the matching 'YYYY-MM-DD' vintage and
+        # silently drop the boundary vintage. Vintage dates are already date-only.
         point_in_time_start = self.config.get("point_in_time_start")
         point_in_time_end = self.config.get("point_in_time_end")
-
         if point_in_time_start:
-            vintage_dates = [d for d in vintage_dates if d >= point_in_time_start]
-
+            start = str(point_in_time_start)[:10]
+            vintage_dates = [d for d in vintage_dates if d[:10] >= start]
         if point_in_time_end:
-            vintage_dates = [d for d in vintage_dates if d <= point_in_time_end]
+            end = str(point_in_time_end)[:10]
+            vintage_dates = [d for d in vintage_dates if d[:10] <= end]
 
         return sorted(vintage_dates)
 
-    def _get_resource_records(
-        self, resource_id: str, context: Context | None
-    ) -> t.Iterable[dict]:
-        """Retrieve records for a specific resource ID."""
-        resource_id = self._sanitize_resource_id(resource_id)
-        url = self.get_url()
-        params = self.query_params.copy()
-        params.update(
-            {
-                self._resource_id_key: resource_id,
-                "sort_order": "asc",
-            }
-        )
+    def _chunk_realtime_windows(self, vintage_dates: list[str]):
+        """Yield (realtime_start, realtime_end) windows spanning <= MAX_VINTAGES_PER_REQUEST
+        vintages each. FRED clips each value's realtime_start/realtime_end to the window,
+        which only duplicates long-lived values across windows (storage, not correctness —
+        the as-of read takes the latest realtime_start <= V)."""
+        step = self.MAX_VINTAGES_PER_REQUEST
+        for i in range(0, len(vintage_dates), step):
+            window = vintage_dates[i : i + step]
+            yield window[0], window[-1]
 
-        # Handle point-in-time mode with vintage-specific queries
-        if context and "vintage_date" in context:
-            vintage_date = context["vintage_date"]
-            # Set both realtime_start and realtime_end to the specific vintage date
-            params["realtime_start"] = vintage_date
-            params["realtime_end"] = vintage_date
-            self.logger.info(
-                f"Point-in-time query for {resource_id} using vintage date {vintage_date}"
+    def _fetch_realtime_range(
+        self, resource_id: str, realtime_start, realtime_end
+    ) -> t.Iterable[dict]:
+        """Paginate one realtime-range observations request; yield raw record dicts.
+
+        realtime_start/realtime_end may be None for non-PIT (current-data) reads —
+        requests drops None-valued params, so FRED falls back to its defaults.
+        """
+        url = self.get_url()
+        limit = self._get_pagination_limit()
+        records_key = self._get_records_key()
+        offset = 0
+        total = 0
+        api_count = None
+        while True:
+            params = self.query_params.copy()
+            params.update(
+                {
+                    self._resource_id_key: resource_id,
+                    "realtime_start": realtime_start,
+                    "realtime_end": realtime_end,
+                    "sort_order": "asc",
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+            response_data = self._make_request(url, params)
+            if not response_data:
+                return
+            if api_count is None:
+                api_count = response_data.get("count")
+            records = response_data.get(records_key, [])
+            total += len(records)
+            yield from records
+            if len(records) < limit:
+                break
+            offset += limit
+
+        # Completeness guard: FRED reports the total matching row count. A shortfall means
+        # the pull was truncated (e.g. an offset cap) — never silently drop point-in-time
+        # rows. Under strict_mode this aborts the partition (RuntimeError always propagates).
+        if api_count is not None and total < api_count:
+            raise RuntimeError(
+                f"Incomplete observations pull for {self._resource_id_key}={resource_id!r} "
+                f"window [{realtime_start}, {realtime_end}]: extracted {total} of "
+                f"{api_count} reported rows (possible FRED offset cap / truncation)."
             )
 
-        response_data = self._fetch_with_retry(url, params)
+    def _emit(self, records: t.Iterable[dict], resource_id, context, window=None):
+        """Post-process and yield records. When ``window=(rt_lo, rt_hi)`` is given (PIT),
+        enforce that every row's realtime_start falls inside the requested realtime window
+        and ALWAYS raise on a violation — a row outside the window means FRED returned a
+        different vintage than asked for, which would silently leak future data into a
+        backtest. This is a hard data-integrity guard, not a skippable error."""
+        for record in records:
+            record[self._resource_id_key] = resource_id
+            processed = self.post_process(record, context)
+            if window is not None:
+                rt_lo, rt_hi = window
+                rs = str(processed.get("realtime_start") or "")[:10]
+                if not rs:
+                    raise RuntimeError(
+                        f"PIT integrity violation: {self._resource_id_key}={resource_id!r} "
+                        f"row missing realtime_start ({processed!r}) — cannot place it on the "
+                        f"vintage timeline, refusing to emit."
+                    )
+                if not (rt_lo <= rs <= rt_hi):
+                    raise RuntimeError(
+                        f"PIT integrity violation: {self._resource_id_key}={resource_id!r} "
+                        f"row realtime_start={rs!r} outside requested window "
+                        f"[{rt_lo}, {rt_hi}] — refusing to emit (possible data leakage)."
+                    )
+            yield processed
 
-        if not response_data:
-            self.logger.warning(
-                f"Empty API response for {self._resource_id_key}='{resource_id}' "
-                f"(likely a 4xx error in permissive mode). No records extracted."
+    def _get_pit_records(
+        self, resource_id: str, context: Context | None
+    ) -> t.Iterable[dict]:
+        """Emit compact ALFRED rows across the resource's (new) vintage windows."""
+        vintage_dates = self._get_vintage_dates_for_resource(resource_id)
+
+        # Incremental: only pull windows containing vintages newer than the bookmark.
+        # A range starting at the first new vintage re-carries the full snapshot (clipped),
+        # so resuming an interrupted backfill never loses earlier history.
+        bookmark = (self.get_context_state(context) or {}).get("replication_key_value")
+        if bookmark is not None:
+            cutoff = str(bookmark)[:10]
+            vintage_dates = [d for d in vintage_dates if d > cutoff]
+
+        if not vintage_dates:
+            self.logger.info(
+                f"{self._resource_id_key}='{resource_id}': no vintage dates to sync "
+                f"in PIT window (bookmark={bookmark})."
             )
             return
 
-        records_key = self._get_records_key()
-        records = response_data.get(records_key, [])
+        for realtime_start, realtime_end in self._chunk_realtime_windows(vintage_dates):
+            yield from self._emit(
+                self._fetch_realtime_range(resource_id, realtime_start, realtime_end),
+                resource_id,
+                context,
+                window=(realtime_start, realtime_end),
+            )
 
-        for record in records:
-            record[self._resource_id_key] = resource_id
-            # Add vintage_date to record for tracking
-            if context and "vintage_date" in context:
-                record["vintage_date"] = context["vintage_date"]
-            record = self.post_process(record, context)
-
-            # Runtime data-leakage guard: in point-in-time mode, every record's
-            # realtime_start MUST equal the requested vintage_date.  A mismatch
-            # means the FRED API returned data from a different vintage — this
-            # would silently corrupt backtesting results.
-            if context and "vintage_date" in context:
-                expected = str(context["vintage_date"])[:10]
-                actual = str(record.get("realtime_start", ""))[:10]
-                if actual != expected:
-                    raise RuntimeError(
-                        f"DATA LEAKAGE: {self._resource_id_key}='{resource_id}' "
-                        f"vintage_date='{expected}' but record has "
-                        f"realtime_start='{actual}'. Aborting to prevent "
-                        f"data contamination."
-                    )
-
-            yield record
+    def _get_current_records(
+        self, resource_id: str, context: Context | None
+    ) -> t.Iterable[dict]:
+        """Non-PIT mode: current observations for the resource (no vintage history)."""
+        yield from self._emit(
+            self._fetch_realtime_range(
+                resource_id,
+                self.query_params.get("realtime_start"),
+                self.query_params.get("realtime_end"),
+            ),
+            resource_id,
+            context,
+        )
 
     def get_records(self, context: Context | None) -> t.Iterable[dict]:
-        """Retrieve records for a specific resource ID from context (partition support).
-
-        Point-in-time optimization: vintage date partitions contain immutable
-        data (FRED never revises a historical vintage snapshot).  When a
-        partition already has a bookmark from a previous sync we skip the API
-        call entirely — the Singer SDK preserves the existing bookmark even
-        when zero records are yielded.
-        """
+        """Emit observations for the resource in the partition context."""
         if context is None or self._resource_id_key not in context:
             yield from super().get_records(context)
             return
 
-        # Skip already-synced vintage partitions (immutable data)
-        # SAFETY: In PIT mode, all records share the same realtime_start
-        # (= vintage_date), so partial extraction still sets bookmark =
-        # vintage_date. If extraction fails BEFORE any records are emitted,
-        # no bookmark exists and the partition retries on next run.
-        # IMPORTANT: Check state["replication_key_value"] directly, NOT
-        # get_starting_replication_key_value() which falls back to start_date
-        # config and would incorrectly skip all new partitions.
-        if context.get("vintage_date"):
-            state = self.get_context_state(context)
-            bookmark = state.get("replication_key_value")
-            if bookmark is not None:
-                self.logger.debug(
-                    f"Skipping completed partition {self._resource_id_key}="
-                    f"{context[self._resource_id_key]}, vintage_date="
-                    f"{context['vintage_date']} (bookmark={bookmark})"
+        resource_id = self._sanitize_resource_id(context[self._resource_id_key])
+        if self.config.get("point_in_time_mode", False):
+            # PIT requires strict_mode: in permissive mode _safe_partition_extraction
+            # swallows a mid-series error and the SDK can finalize the realtime_start
+            # bookmark past un-emitted vintages, silently dropping PIT data. Fail loud.
+            if not self.config.get("strict_mode", False):
+                raise RuntimeError(
+                    f"{self.name}: point_in_time_mode requires strict_mode=true "
+                    "(permissive mode can finalize a bookmark past un-emitted vintages "
+                    "and silently drop point-in-time data)."
                 )
-                return
-
-        resource_id = context[self._resource_id_key]
+            extractor = self._get_pit_records(resource_id, context)
+        else:
+            extractor = self._get_current_records(resource_id, context)
         yield from self._safe_partition_extraction(
-            self._get_resource_records(resource_id, context),
-            resource_id,
-            self._resource_id_key,
+            extractor, resource_id, self._resource_id_key
         )

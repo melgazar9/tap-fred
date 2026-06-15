@@ -109,11 +109,13 @@ class SeriesObservationsStream(PointInTimePartitionStream):
 
     name = "series_observations"
     path = "/series/observations"
+    # Compact bitemporal rows: a (series_id, date) has one row per realtime period
+    # (value version), keyed by its realtime_start. "As of vintage V" is a downstream
+    # read (latest realtime_start <= V), not a materialized per-vintage snapshot.
     primary_keys: t.ClassVar[list[str]] = [
         "series_id",
         "date",
         "realtime_start",
-        "realtime_end",
     ]
     _add_surrogate_key = False
 
@@ -121,9 +123,10 @@ class SeriesObservationsStream(PointInTimePartitionStream):
     _resource_type = "series"
     _resource_id_key = "series_id"
 
-    # Incremental replication by realtime_start (vintage publication date)
+    # Incremental replication by realtime_start (knowledge time). Not sorted: a window
+    # chunk returns rows across many realtime periods, so realtime_start is not monotonic.
     replication_key = "realtime_start"
-    is_sorted = True  # Within each partition, realtime_start values are identical (=vintage_date)
+    is_sorted = False
 
     schema = th.PropertiesList(
         th.Property("series_id", th.StringType, description="FRED series identifier"),
@@ -136,18 +139,12 @@ class SeriesObservationsStream(PointInTimePartitionStream):
         th.Property(
             "realtime_start",
             th.DateType,
-            description="Real-time start date for this observation",
+            description="First date this value was the current vintage (knowledge time)",
         ),
-        th.Property(
-            "realtime_end",
-            th.DateType,
-            description="Real-time end date for this observation",
-        ),
-        th.Property(
-            "vintage_date",
-            th.DateType,
-            description="Vintage date for point-in-time mode (null in standard mode)",
-        ),
+        # realtime_end is intentionally NOT stored: FRED clips it to each fetch window,
+        # so a stored value would be wrong. The faithful interval end is derived at read
+        # time as LEAD(realtime_start) - 1 (see sql/fred_observations_asof.sql). As-of
+        # reads use realtime_start only ("latest realtime_start <= V wins").
     ).to_dict()
 
     def _get_records_key(self) -> str:
@@ -157,6 +154,10 @@ class SeriesObservationsStream(PointInTimePartitionStream):
     def post_process(self, record: dict, context: t.Any = None) -> dict:
         """Transform raw data to match expected structure."""
         record = super().post_process(record, context)
+
+        # Don't persist FRED's realtime_end — it's clipped to the fetch window and would
+        # be a misleading validity bound. Derive intervals downstream via LEAD instead.
+        record.pop("realtime_end", None)
 
         if "value" in record and record["value"] is not None:
             try:

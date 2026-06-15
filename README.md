@@ -9,7 +9,7 @@ Built with the [Meltano Tap SDK](https://sdk.meltano.com) for Singer Taps.
 - **32 FRED API endpoints** across 6 domain categories (series, categories, releases, sources, tags, GeoFRED)
 - **FRED Mode**: Current revised economic data for analysis and reporting
 - **ALFRED Mode**: Historical vintage data for backtesting without look-ahead bias
-- **Point-in-Time Mode**: Per-vintage-date partitions with data leakage prevention
+- **Point-in-Time Mode**: Compact bitemporal ALFRED history (one row per value version, keyed by `realtime_start`) with a leakage-safe as-of read
 - **Incremental Loading**: State management with partition-aware bookmarking
 - **Wildcard Discovery**: Extract all resources with `["*"]` configuration
 - **Rate Limiting**: Sliding window throttling with exponential backoff retry
@@ -55,7 +55,7 @@ meltano el --state-id my-job tap-fred target-jsonl --select series_observations
 | `series_ids` | array/string | Yes | | Series IDs to extract (`["GDP", "UNRATE"]` or `["*"]`) |
 | `start_date` | date | No | | Earliest observation date |
 | `api_url` | string | No | `https://api.stlouisfed.org/fred` | FRED API base URL |
-| `max_requests_per_minute` | integer | No | `60` | Rate limit (FRED allows up to 120) |
+| `max_requests_per_minute` | integer | No | `60` | Rate limit. FRED's ~120/min cap is PER-IP (shared across keys), so this is a per-IP budget — run a single worker, don't multiply it across concurrent jobs |
 | `min_throttle_seconds` | float | No | `1.0` | Min seconds between requests |
 | `strict_mode` | boolean | No | `false` | If true, fail on any non-retriable error; if false, skip and log |
 

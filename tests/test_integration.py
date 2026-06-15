@@ -89,7 +89,7 @@ class TestTapFREDIntegration(unittest.TestCase):
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["realtime_start"], "2020-01-01")
-        self.assertEqual(records[0]["realtime_end"], "2020-01-01")
+        self.assertNotIn("realtime_end", records[0])  # not stored (derived in SQL)
         self.assertEqual(records[0]["value"], 21734.266)
 
     @patch("tap_fred.client.requests.Session.get")
@@ -181,7 +181,6 @@ class TestTapFREDIntegration(unittest.TestCase):
             "date",
             "value",
             "realtime_start",
-            "realtime_end",
         ]
 
         for field in required_fields:
@@ -194,10 +193,10 @@ class TestTapFREDIntegration(unittest.TestCase):
         streams = {stream.name: stream for stream in tap.streams.values()}
         series_obs_stream = streams["series_observations"]
 
-        # Updated PK: includes realtime_start/end to prevent vintage data overwriting
+        # Compact bitemporal PK: one row per (series, date, realtime_start) value version.
         self.assertEqual(
             series_obs_stream.primary_keys,
-            ["series_id", "date", "realtime_start", "realtime_end"],
+            ["series_id", "date", "realtime_start"],
         )
 
         self.assertTrue(hasattr(series_obs_stream, "_resource_type"))
@@ -622,18 +621,15 @@ class TestIncrementalReplication(unittest.TestCase):
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
 
         self.assertEqual(stream.replication_key, "realtime_start")
-        # PK must include realtime dates to prevent vintage overwrites
-        self.assertIn("realtime_start", stream.primary_keys)
-        self.assertIn("realtime_end", stream.primary_keys)
+        # Compact PK: (series_id, date, realtime_start) — one row per value version.
+        self.assertEqual(stream.primary_keys, ["series_id", "date", "realtime_start"])
 
 
 class TestIncrementalPartitionSkip(unittest.TestCase):
-    """Tests that point-in-time partitions are correctly skipped after first sync.
-
-    Vintage data is immutable — once a (series_id, vintage_date) partition has
-    been fully synced, the tap must NEVER hit the API for it again.  This is
-    critical for the full-wildcard ALFRED backfill: without skip logic, every
-    run would re-fetch millions of already-synced partitions.
+    """Point-in-time observations: one partition per series, full vintage history
+    pulled via realtime-range windows chunked at MAX_VINTAGES_PER_REQUEST. Incremental
+    runs fetch only vintages newer than the realtime_start bookmark, so a steady state
+    with no new vintages makes zero API calls.
     """
 
     def setUp(self):
@@ -646,65 +642,103 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
             "point_in_time_mode": True,
             "point_in_time_start": "2020-01-01",
             "point_in_time_end": "2020-03-31",
+            "strict_mode": True,
         }
 
+    def _vintages(self, dates):
+        return [{"resource_id": "GDP", "vintage_date": d} for d in dates]
+
+    def test_partitions_are_per_series_not_per_vintage(self):
+        """PIT partitions are one-per-series (stable bookmark), never one-per-vintage."""
+        tap = TapFRED(config=self.config)
+        tap._cached_series_ids = [{"series_id": "GDP"}]
+        partitions = {s.name: s for s in tap.streams.values()}[
+            "series_observations"
+        ].partitions
+        self.assertEqual(partitions, [{"series_id": "GDP"}])
+        self.assertNotIn("vintage_date", partitions[0])
+
     @patch("tap_fred.client.FREDStream._make_request")
-    def test_completed_vintage_partition_skips_api_call(self, mock_request):
-        """A partition with an existing bookmark must NOT make any API call."""
+    def test_backfill_pulls_all_vintages_in_one_window(self, mock_request):
+        """No bookmark -> one realtime-range request spanning min..max vintage; compact
+        rows are emitted exactly as FRED returns them (no vintage_date field added)."""
         mock_request.return_value = {
             "observations": [
                 {
-                    "date": "2024-01-01",
-                    "value": "100.0",
+                    "date": "2019-10-01",
+                    "value": "21.0",
                     "realtime_start": "2020-01-30",
-                    "realtime_end": "2020-01-30",
+                    "realtime_end": "2020-02-26",
                 },
             ]
         }
-
         tap = TapFRED(config=self.config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
-
-        context = {"series_id": "GDP", "vintage_date": "2020-01-30"}
-
-        # Simulate an existing bookmark from a previous sync
-        with patch.object(
-            stream,
-            "get_context_state",
-            return_value={"replication_key_value": "2020-01-30"},
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=self._vintages(["2020-01-30", "2020-02-27", "2020-03-26"]),
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
         ):
-            records = list(stream.get_records(context=context))
+            records = list(stream.get_records(context={"series_id": "GDP"}))
 
-        # CRITICAL: No records emitted (partition is skipped)
-        self.assertEqual(records, [])
-        # CRITICAL: No API call made
-        mock_request.assert_not_called()
+        self.assertEqual(mock_request.call_count, 1)
+        params = mock_request.call_args.args[1]
+        self.assertEqual(params["realtime_start"], "2020-01-30")
+        self.assertEqual(params["realtime_end"], "2020-03-26")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["realtime_start"], "2020-01-30")
+        self.assertNotIn("vintage_date", records[0])
 
     @patch("tap_fred.client.FREDStream._make_request")
-    def test_new_vintage_partition_fetches_normally(self, mock_request):
-        """A partition WITHOUT a bookmark must fetch from the API."""
-        mock_request.return_value = {
-            "observations": [
-                {
-                    "date": "2024-01-01",
-                    "value": "100.0",
-                    "realtime_start": "2020-01-30",
-                    "realtime_end": "2020-01-30",
-                },
-            ]
-        }
-
+    def test_incremental_only_fetches_vintages_after_bookmark(self, mock_request):
+        """A realtime_start bookmark restricts the pull to strictly-newer vintages."""
+        mock_request.return_value = {"observations": []}
         tap = TapFRED(config=self.config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=self._vintages(["2020-01-30", "2020-02-27", "2020-03-26"]),
+            ),
+            patch.object(
+                stream,
+                "get_context_state",
+                return_value={"replication_key_value": "2020-02-27"},
+            ),
+        ):
+            list(stream.get_records(context={"series_id": "GDP"}))
 
-        context = {"series_id": "GDP", "vintage_date": "2020-01-30"}
+        # Only the vintage strictly after the bookmark (2020-03-26) is fetched.
+        self.assertEqual(mock_request.call_count, 1)
+        params = mock_request.call_args.args[1]
+        self.assertEqual(params["realtime_start"], "2020-03-26")
+        self.assertEqual(params["realtime_end"], "2020-03-26")
 
-        # No existing bookmark — first sync of this partition
-        with patch.object(stream, "get_context_state", return_value={}):
-            records = list(stream.get_records(context=context))
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_no_new_vintages_makes_no_api_call(self, mock_request):
+        """Steady state: bookmark at the latest vintage -> zero requests, zero records."""
+        tap = TapFRED(config=self.config)
+        stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=self._vintages(["2020-01-30"]),
+            ),
+            patch.object(
+                stream,
+                "get_context_state",
+                return_value={"replication_key_value": "2020-01-30"},
+            ),
+        ):
+            records = list(stream.get_records(context={"series_id": "GDP"}))
 
-        self.assertEqual(len(records), 1)
-        mock_request.assert_called_once()
+        self.assertEqual(records, [])
+        mock_request.assert_not_called()
 
     @patch("tap_fred.client.FREDStream._make_request")
     def test_non_pit_partition_never_skipped(self, mock_request):
@@ -738,42 +772,36 @@ class TestIncrementalPartitionSkip(unittest.TestCase):
         mock_request.assert_called_once()
 
     @patch("tap_fred.client.FREDStream._make_request")
-    def test_run1_then_run2_skips_completed_partitions(self, mock_request):
-        """Simulate full Run 1 → Run 2 lifecycle: Run 2 must skip synced partitions."""
-        observations = {
-            "observations": [
-                {
-                    "date": "2024-01-01",
-                    "value": "100.0",
-                    "realtime_start": "2020-01-30",
-                    "realtime_end": "2020-01-30",
-                },
-            ]
-        }
-        mock_request.return_value = observations
-
+    def test_vintages_beyond_max_split_into_multiple_windows(self, mock_request):
+        """>MAX_VINTAGES_PER_REQUEST vintages -> several contiguous realtime-range windows
+        (FRED caps vintages-per-request); bounds tile the vintage list with no gap."""
+        mock_request.return_value = {"observations": []}
         tap = TapFRED(config=self.config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
-
-        context = {"series_id": "GDP", "vintage_date": "2020-01-30"}
-
-        # Run 1: no bookmark → fetch normally
-        with patch.object(stream, "get_context_state", return_value={}):
-            run1_records = list(stream.get_records(context=context))
-        self.assertEqual(len(run1_records), 1)
-        self.assertEqual(mock_request.call_count, 1)
-
-        mock_request.reset_mock()
-
-        # Run 2: bookmark exists → skip
-        with patch.object(
-            stream,
-            "get_context_state",
-            return_value={"replication_key_value": "2020-01-30"},
+        stream.MAX_VINTAGES_PER_REQUEST = 2  # shrink for the test
+        # All within the setUp PIT window [2020-01-01, 2020-03-31].
+        dates = ["2020-01-01", "2020-01-15", "2020-02-01", "2020-02-15", "2020-03-01"]
+        with (
+            patch.object(
+                tap, "get_cached_vintage_dates", return_value=self._vintages(dates)
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
         ):
-            run2_records = list(stream.get_records(context=context))
-        self.assertEqual(run2_records, [])
-        mock_request.assert_not_called()
+            list(stream.get_records(context={"series_id": "GDP"}))
+
+        self.assertEqual(mock_request.call_count, 3)
+        windows = [
+            (c.args[1]["realtime_start"], c.args[1]["realtime_end"])
+            for c in mock_request.call_args_list
+        ]
+        self.assertEqual(
+            windows,
+            [
+                ("2020-01-01", "2020-01-15"),
+                ("2020-02-01", "2020-02-15"),
+                ("2020-03-01", "2020-03-01"),
+            ],
+        )
 
     def test_vintage_dates_per_series_partitions(self):
         """series_vintage_dates must use per-series partitions for independent bookmarks.
@@ -931,11 +959,10 @@ class TestAlfredPointInTimeAccuracy(unittest.TestCase):
         self.assertEqual(alfred_records[0]["realtime_start"], "2020-01-01")
 
     @patch("tap_fred.client.FREDStream._make_request")
-    def test_point_in_time_partitions_capture_gdp_revisions(self, mock_request):
-        """Point-in-time mode must create separate partitions per vintage date.
-
-        Each partition captures GDP as-known-on that specific date, showing
-        real revision history (e.g., initial estimate → first revision → final).
+    def test_point_in_time_captures_gdp_revisions_as_compact_rows(self, mock_request):
+        """PIT mode emits FRED's compact revision history (one row per value version,
+        tagged by realtime_start). The full vintage as-of any date is recovered by the
+        bitemporal read 'latest realtime_start <= V' — proven here against GDP revisions.
         """
         pit_config = {
             "api_key": "test_api_key",
@@ -944,79 +971,67 @@ class TestAlfredPointInTimeAccuracy(unittest.TestCase):
             "point_in_time_mode": True,
             "point_in_time_start": "2020-01-01",
             "point_in_time_end": "2020-03-31",
+            "strict_mode": True,
         }
 
-        # Mock vintage dates discovery
-        vintage_dates_response = {
-            "vintage_dates": ["2020-01-30", "2020-02-27", "2020-03-26"]
+        # GDP Q4 2019 as a compact revision history (what a realtime-range pull returns):
+        # initial estimate -> revision DOWN -> settled, each with its realtime window.
+        mock_request.return_value = {
+            "observations": [
+                {
+                    "date": "2019-10-01",
+                    "value": "21734.266",
+                    "realtime_start": "2020-01-30",
+                    "realtime_end": "2020-02-26",
+                },
+                {
+                    "date": "2019-10-01",
+                    "value": "21726.779",
+                    "realtime_start": "2020-02-27",
+                    "realtime_end": "2020-03-25",
+                },
+                {
+                    "date": "2019-10-01",
+                    "value": "21729.124",
+                    "realtime_start": "2020-03-26",
+                    "realtime_end": "9999-12-31",
+                },
+            ]
         }
-
-        # GDP Q4 2019 values at each vintage date (real revision pattern)
-        vintage_responses = {
-            "2020-01-30": {
-                "observations": [
-                    {
-                        "realtime_start": "2020-01-30",
-                        "realtime_end": "2020-01-30",
-                        "date": "2019-10-01",
-                        "value": "21734.266",
-                    },  # Initial estimate
-                ]
-            },
-            "2020-02-27": {
-                "observations": [
-                    {
-                        "realtime_start": "2020-02-27",
-                        "realtime_end": "2020-02-27",
-                        "date": "2019-10-01",
-                        "value": "21726.779",
-                    },  # First revision DOWN
-                ]
-            },
-            "2020-03-26": {
-                "observations": [
-                    {
-                        "realtime_start": "2020-03-26",
-                        "realtime_end": "2020-03-26",
-                        "date": "2019-10-01",
-                        "value": "21729.124",
-                    },  # Settled value
-                ]
-            },
-        }
-
-        def mock_request_side_effect(url, params):
-            if "vintagedates" in url:
-                return vintage_dates_response
-            vintage = params.get("realtime_start", "")
-            return vintage_responses.get(vintage, {"observations": []})
-
-        mock_request.side_effect = mock_request_side_effect
 
         tap = TapFRED(config=pit_config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=[
+                    {"resource_id": "GDP", "vintage_date": d}
+                    for d in ["2020-01-30", "2020-02-27", "2020-03-26"]
+                ],
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
+        ):
+            records = list(stream.get_records(context={"series_id": "GDP"}))
 
-        # Verify partitions are created for each vintage date
-        partitions = stream.partitions
-        vintage_partition_dates = [
-            p["vintage_date"] for p in partitions if "vintage_date" in p
-        ]
+        # Compact rows landed as-is: one per value version, tagged by realtime_start,
+        # no fabricated vintage_date.
+        self.assertEqual(len(records), 3)
         self.assertEqual(
-            vintage_partition_dates, ["2020-01-30", "2020-02-27", "2020-03-26"]
+            [r["realtime_start"] for r in records],
+            ["2020-01-30", "2020-02-27", "2020-03-26"],
         )
+        self.assertNotIn("vintage_date", records[0])
 
-        # Extract records for each vintage partition
-        all_values = []
-        for partition in partitions:
-            records = list(stream.get_records(context=partition))
-            for r in records:
-                all_values.append(r["value"])
+        # Bitemporal as-of read: latest realtime_start <= V wins.
+        def as_of(v):
+            applicable = [r for r in records if r["realtime_start"] <= v]
+            return max(applicable, key=lambda r: r["realtime_start"])["value"]
 
-        # GDP revisions: initial estimate → revision down → settled
-        self.assertEqual(all_values, [21734.266, 21726.779, 21729.124])
-
-        # Initial estimate > first revision (GDP was revised DOWN)
-        self.assertGreater(all_values[0], all_values[1])
+        self.assertEqual(as_of("2020-02-15"), 21734.266)  # initial estimate
+        self.assertEqual(as_of("2020-03-10"), 21726.779)  # after revision down
+        self.assertEqual(as_of("2020-04-01"), 21729.124)  # settled
+        self.assertGreater(as_of("2020-02-15"), as_of("2020-03-10"))  # revised DOWN
 
     def test_vintage_dates_stream_excludes_realtime_params(self):
         """series_vintage_dates must NOT send realtime_start/end to avoid API errors.
@@ -1029,6 +1044,214 @@ class TestAlfredPointInTimeAccuracy(unittest.TestCase):
 
         self.assertNotIn("realtime_start", stream.query_params)
         self.assertNotIn("realtime_end", stream.query_params)
+
+
+class TestRealtimeRangeCompleteness(unittest.TestCase):
+    """Deterministic (no-network) coverage for the realtime-range observations fetch:
+    cross-chunk as-of reconstruction, the FRED-count completeness guard, and the two
+    boundary fixes (time-component PIT bounds, missing realtime_start). The live
+    equivalence suite (tests/test_pit_equivalence.py) proves the same property against
+    real FRED but skips in CI — these lock it offline.
+    """
+
+    def setUp(self):
+        self.config = {
+            "api_key": "test_api_key",
+            "series_ids": ["GDP"],
+            "data_mode": "ALFRED",
+            "point_in_time_mode": True,
+            "point_in_time_start": "2020-01-01",
+            "point_in_time_end": "2020-03-31",
+            "strict_mode": True,
+        }
+
+    def _vintages(self, dates):
+        return [{"resource_id": "GDP", "vintage_date": d} for d in dates]
+
+    @staticmethod
+    def _as_of(records, v):
+        applicable = [r for r in records if r["realtime_start"] <= v]
+        return max(applicable, key=lambda r: r["realtime_start"])["value"]
+
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_cross_chunk_reconstruction(self, mock_request):
+        """Vintages split across two realtime windows (FRED clips realtime_start per
+        window). The as-of read must still reconstruct the correct value on BOTH sides of
+        the chunk boundary — the core PIT property under window chunking."""
+        # Window 1 [2020-01-30, 2020-02-27]: initial estimate then a revision DOWN.
+        # Window 2 [2020-03-26, 2020-03-26]: the settled value (realtime_start clipped).
+        mock_request.side_effect = [
+            {
+                "count": 2,
+                "observations": [
+                    {
+                        "date": "2019-10-01",
+                        "value": "21734.266",
+                        "realtime_start": "2020-01-30",
+                    },
+                    {
+                        "date": "2019-10-01",
+                        "value": "21726.779",
+                        "realtime_start": "2020-02-27",
+                    },
+                ],
+            },
+            {
+                "count": 1,
+                "observations": [
+                    {
+                        "date": "2019-10-01",
+                        "value": "21729.124",
+                        "realtime_start": "2020-03-26",
+                    },
+                ],
+            },
+        ]
+        tap = TapFRED(config=self.config)
+        stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        stream.MAX_VINTAGES_PER_REQUEST = 2  # force a 2-window split
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=self._vintages(["2020-01-30", "2020-02-27", "2020-03-26"]),
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
+        ):
+            records = list(stream.get_records(context={"series_id": "GDP"}))
+
+        self.assertEqual(mock_request.call_count, 2)
+        self.assertEqual(len(records), 3)
+        # As-of read spans the chunk boundary (window 1 -> window 2) seamlessly.
+        self.assertEqual(self._as_of(records, "2020-02-15"), 21734.266)
+        self.assertEqual(self._as_of(records, "2020-03-10"), 21726.779)
+        self.assertEqual(self._as_of(records, "2020-04-01"), 21729.124)
+
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_completeness_guard_raises_on_shortfall(self, mock_request):
+        """FRED reports a total `count`; extracting fewer rows means truncation (offset
+        cap). Strict-mode PIT must abort, never silently drop point-in-time rows."""
+        mock_request.return_value = {
+            "count": 3,  # FRED says 3 exist...
+            "observations": [  # ...but only 2 returned (and it's a short final page)
+                {"date": "2019-10-01", "value": "21.0", "realtime_start": "2020-01-30"},
+                {"date": "2019-07-01", "value": "20.0", "realtime_start": "2020-01-30"},
+            ],
+        }
+        tap = TapFRED(config=self.config)
+        stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=self._vintages(["2020-01-30"]),
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                list(stream.get_records(context={"series_id": "GDP"}))
+        self.assertIn("Incomplete observations pull", str(ctx.exception))
+
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_completeness_passes_across_pages(self, mock_request):
+        """Multi-page pull whose page sum equals the reported count must NOT false-trip
+        the completeness guard."""
+        config = {**self.config, "series_observations_limit": 2}
+        mock_request.side_effect = [
+            {
+                "count": 3,
+                "observations": [
+                    {
+                        "date": "2019-10-01",
+                        "value": "21.0",
+                        "realtime_start": "2020-01-30",
+                    },
+                    {
+                        "date": "2019-07-01",
+                        "value": "20.0",
+                        "realtime_start": "2020-01-30",
+                    },
+                ],
+            },
+            {
+                "count": 3,
+                "observations": [
+                    {
+                        "date": "2019-04-01",
+                        "value": "19.0",
+                        "realtime_start": "2020-01-30",
+                    },
+                ],
+            },
+        ]
+        tap = TapFRED(config=config)
+        stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=self._vintages(["2020-01-30"]),
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
+        ):
+            records = list(stream.get_records(context={"series_id": "GDP"}))
+        self.assertEqual(mock_request.call_count, 2)
+        self.assertEqual(len(records), 3)
+
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_pit_bounds_with_time_component_keep_boundary_vintage(self, mock_request):
+        """A point_in_time bound carrying a time component must not lexically drop the
+        matching date-only boundary vintage."""
+        config = {
+            **self.config,
+            "point_in_time_start": "2020-01-30T00:00:00",
+            "point_in_time_end": "2020-01-30T23:59:59",
+        }
+        mock_request.return_value = {
+            "count": 1,
+            "observations": [
+                {"date": "2019-10-01", "value": "21.0", "realtime_start": "2020-01-30"},
+            ],
+        }
+        tap = TapFRED(config=config)
+        stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=self._vintages(["2020-01-30"]),
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
+        ):
+            records = list(stream.get_records(context={"series_id": "GDP"}))
+        # The boundary vintage survived the filter -> one request, one row.
+        self.assertEqual(mock_request.call_count, 1)
+        self.assertEqual(len(records), 1)
+
+    @patch("tap_fred.client.FREDStream._make_request")
+    def test_missing_realtime_start_raises(self, mock_request):
+        """A row with no realtime_start can't be placed on the vintage timeline; the
+        integrity guard must raise a clear, distinct error (not the out-of-window one).
+        """
+        mock_request.return_value = {
+            "count": 1,
+            "observations": [
+                {"date": "2019-10-01", "value": "21.0", "realtime_start": ""},
+            ],
+        }
+        tap = TapFRED(config=self.config)
+        stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=self._vintages(["2020-01-30"]),
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                list(stream.get_records(context={"series_id": "GDP"}))
+        self.assertIn("missing realtime_start", str(ctx.exception))
 
 
 class TestEndpointContracts(unittest.TestCase):
@@ -1594,132 +1817,112 @@ class TestDataLeakagePrevention(unittest.TestCase):
             "point_in_time_mode": True,
             "point_in_time_start": "2025-01-01",
             "point_in_time_end": "2025-01-10",
+            "strict_mode": True,
         }
 
-    def test_pit_skips_series_with_no_vintage_dates(self):
-        """Fix 1: Series with no vintage dates in range must produce ZERO partitions.
+    def test_pit_requires_strict_mode(self):
+        """PIT extraction is refused in permissive mode: a swallowed mid-series error
+        could finalize the bookmark past un-emitted vintages and silently drop data."""
+        config = {**self.pit_config, "strict_mode": False}
+        tap = TapFRED(config=config)
+        stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with self.assertRaises(RuntimeError) as cm:
+            list(stream.get_records(context={"series_id": "GDP"}))
+        self.assertIn("strict_mode", str(cm.exception))
 
-        GDP is quarterly — no vintage dates exist in a 10-day window.
-        The old code created a fallback partition WITHOUT vintage_date, which
-        hit the API with realtime_start=today, returning current revised data.
-        """
+    def test_series_with_no_vintage_dates_emits_nothing(self):
+        """No fallback: a series with no vintage dates in the PIT window emits ZERO rows
+        and makes ZERO API calls — it must NEVER fall back to current/revised data."""
         tap = TapFRED(config=self.pit_config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
-
-        # Mock: GDP has no vintage dates, DGS10 has some
-        mock_vintage_dates = [
-            {"resource_id": "DGS10", "vintage_date": "2025-01-02"},
-            {"resource_id": "DGS10", "vintage_date": "2025-01-03"},
-        ]
-
         with (
             patch.object(
-                tap, "get_cached_vintage_dates", return_value=mock_vintage_dates
-            ),
-            patch.object(
                 tap,
-                "get_cached_series_ids",
-                return_value=[{"series_id": "GDP"}, {"series_id": "DGS10"}],
+                "get_cached_vintage_dates",
+                return_value=[{"resource_id": "DGS10", "vintage_date": "2025-01-02"}],
             ),
+            patch.object(stream, "get_context_state", return_value={}),
+            patch("tap_fred.client.FREDStream._make_request") as mock_request,
         ):
-            partitions = stream.partitions
+            records = list(stream.get_records(context={"series_id": "GDP"}))
 
-        # GDP must NOT have any partitions (no fallback)
-        gdp_partitions = [p for p in partitions if p.get("series_id") == "GDP"]
-        self.assertEqual(
-            len(gdp_partitions),
-            0,
-            "GDP should have zero partitions — no fallback allowed",
-        )
-
-        # DGS10 must have exactly 2 partitions (one per vintage date)
-        dgs10_partitions = [p for p in partitions if p.get("series_id") == "DGS10"]
-        self.assertEqual(len(dgs10_partitions), 2)
-        # Each partition must have a vintage_date
-        for p in dgs10_partitions:
-            self.assertIn(
-                "vintage_date", p, "Every PIT partition must have vintage_date"
-            )
+        self.assertEqual(records, [])
+        mock_request.assert_not_called()
 
     @patch("tap_fred.client.FREDStream._make_request")
-    def test_data_leakage_guard_raises_on_mismatch(self, mock_request):
-        """Fix 2: RuntimeError must be raised if realtime_start != vintage_date.
-
-        This catches scenarios where the FRED API returns data from a different
-        vintage than requested — silent data contamination.
-        """
-        # API returns realtime_start=2025-01-15 but we requested vintage_date=2025-01-02
+    def test_realtime_start_preserved_verbatim_within_window(self, mock_request):
+        """realtime_start is landed exactly as FRED returns it (not clipped to a single
+        vintage) for values whose realtime_start falls inside the requested window;
+        realtime_end is not stored."""
         mock_request.return_value = {
             "observations": [
                 {
                     "date": "2024-10-01",
                     "value": "21000.0",
-                    "realtime_start": "2025-01-15",
-                    "realtime_end": "2025-01-15",
+                    "realtime_start": "2025-01-06",  # inside window, between the vintages
+                    "realtime_end": "9999-12-31",
                 },
             ]
         }
-
         tap = TapFRED(config=self.pit_config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=[
+                    {"resource_id": "DGS10", "vintage_date": "2025-01-02"},
+                    {"resource_id": "DGS10", "vintage_date": "2025-01-08"},
+                ],
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
+        ):
+            records = list(stream.get_records(context={"series_id": "DGS10"}))
 
-        context = {"series_id": "DGS10", "vintage_date": "2025-01-02"}
-
-        with patch.object(stream, "get_context_state", return_value={}):
-            with self.assertRaises(RuntimeError) as cm:
-                list(stream.get_records(context=context))
-
-        self.assertIn("DATA LEAKAGE", str(cm.exception))
-        self.assertIn("2025-01-02", str(cm.exception))
-        self.assertIn("2025-01-15", str(cm.exception))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["realtime_start"], "2025-01-06")  # verbatim
+        self.assertNotIn("realtime_end", records[0])  # not persisted
 
     @patch("tap_fred.client.FREDStream._make_request")
-    def test_data_leakage_guard_passes_on_match(self, mock_request):
-        """Fix 2 (positive case): No error when realtime_start matches vintage_date."""
+    def test_integrity_guard_raises_on_out_of_window_realtime_start(self, mock_request):
+        """Hard leakage guard (replaces the old realtime_start==vintage assert): a row whose
+        realtime_start falls OUTSIDE the requested window means FRED returned a different
+        vintage than asked — must raise and never emit, even in permissive mode."""
         mock_request.return_value = {
             "observations": [
                 {
                     "date": "2024-10-01",
-                    "value": "4.25",
-                    "realtime_start": "2025-01-02",
-                    "realtime_end": "2025-01-02",
+                    "value": "21000.0",
+                    "realtime_start": "2025-01-15",  # outside window [2025-01-02, 2025-01-02]
+                    "realtime_end": "9999-12-31",
                 },
             ]
         }
-
         tap = TapFRED(config=self.pit_config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
+        with (
+            patch.object(
+                tap,
+                "get_cached_vintage_dates",
+                return_value=[{"resource_id": "DGS10", "vintage_date": "2025-01-02"}],
+            ),
+            patch.object(stream, "get_context_state", return_value={}),
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                list(stream.get_records(context={"series_id": "DGS10"}))
+        self.assertIn("integrity", str(cm.exception).lower())
 
-        context = {"series_id": "DGS10", "vintage_date": "2025-01-02"}
-
-        with patch.object(stream, "get_context_state", return_value={}):
-            records = list(stream.get_records(context=context))
-
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["realtime_start"], "2025-01-02")
-        self.assertEqual(records[0]["vintage_date"], "2025-01-02")
-
-    def test_vintage_date_in_schema(self):
-        """Fix 3: vintage_date must be in SeriesObservationsStream schema.
-
-        Without this, the SDK silently drops the vintage_date field that
-        _get_resource_records adds, making it impossible for downstream
-        consumers to identify which vintage a record belongs to.
+    def test_schema_is_compact_bitemporal_without_vintage_date(self):
+        """Compact schema: realtime_start present; vintage_date AND realtime_end removed
+        (as-of vintage is a downstream read; realtime_end is derived in SQL, not stored).
         """
         tap = TapFRED(config=self.pit_config)
         stream = {s.name: s for s in tap.streams.values()}["series_observations"]
 
-        schema_properties = stream.schema.get("properties", {})
-        self.assertIn(
-            "vintage_date",
-            schema_properties,
-            "vintage_date must be in schema so SDK doesn't silently drop it",
-        )
-        self.assertEqual(
-            schema_properties["vintage_date"]["format"],
-            "date",
-            "vintage_date must be DateType (format=date)",
-        )
+        props = stream.schema.get("properties", {})
+        self.assertNotIn("vintage_date", props)
+        self.assertNotIn("realtime_end", props)
+        self.assertEqual(props["realtime_start"]["format"], "date")
 
 
 class TestInstitutionalHardening(unittest.TestCase):
