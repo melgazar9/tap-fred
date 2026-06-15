@@ -235,6 +235,29 @@ class FREDStream(RESTStream, ABC):
 
                 # Non-retryable client errors (400-499 except 403/429)
                 response_body = e.response.text[:200] if e.response.text else "no body"
+
+                # FRED returns 400 "does not exist in ALFRED but may exist in FRED" for
+                # FRED-only series (e.g. SP500, market indices) that carry no vintage /
+                # point-in-time history. There is no PIT data to lose, so skip the series and
+                # return empty even under strict_mode — it's an absence, not a leakage error.
+                # (Otherwise one non-ALFRED series aborts the whole strict-mode stream.)
+                if status_code == 400 and "does not exist in ALFRED" in (
+                    e.response.text or ""
+                ):
+                    logging.info(
+                        f"{redacted_url}: series not in ALFRED — no vintage history; "
+                        f"skipping (no point-in-time data to extract)."
+                    )
+                    self._skipped_partitions.append(
+                        {
+                            "stream": self.name,
+                            "url": redacted_url,
+                            "status_code": status_code,
+                            "reason": "not_in_alfred",
+                        }
+                    )
+                    return {}
+
                 logging.warning(
                     f"Client error {status_code} for {redacted_url}: "
                     f"{response_body}. Skipping - data may be missing."

@@ -213,7 +213,7 @@ Some streams require specific configuration to be registered:
 - **`geofred_regional_params`**: `geofred_regional_data`
 - **`geofred_series_ids`**: `geofred_series_data`
 
-## Migration Notes
+## Schema Notes
 
 ### Compact bitemporal series_observations
 
@@ -222,10 +222,9 @@ one row per value version. `vintage_date` and `realtime_end` are **not** stored 
 `realtime_end` to each fetch window, so a stored value would be wrong; the faithful interval
 end is derived downstream as `LEAD(realtime_start) - 1 day`.
 
-This is a **breaking change** from any prior per-vintage materialization: the old table is
-incompatible (different columns + PK, and the old per-vintage rows would corrupt the as-of
-read). Migrating an existing deployment requires dropping the old table and re-backfilling —
-see `projects/financial-elt/sql/fred_compact_schema_migration.sql` for the full runbook.
+If you previously deployed a per-vintage version *with data*, drop the old table and
+re-backfill (the schemas are incompatible). For a fresh deploy nothing special is needed —
+the table is created with the compact schema on first load.
 
 ## Operations
 

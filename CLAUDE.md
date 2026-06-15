@@ -104,13 +104,11 @@ Page-level errors mid-pagination (429, 500, offset cap 400) are handled:
 | `series_updates` | `last_updated` | Large stream (90K+). SDK-side filtering emits only series updated since last bookmark. API still fetches all records (FRED has no server-side "updated since" filter). |
 | All other streams | None (FULL_TABLE) | Metadata streams with small datasets. FRED API has no "updated since" parameter on these endpoints. Re-fetching everything each run is correct. |
 
-## Migration Notes
+## Schema Notes
 
 ### Compact bitemporal series_observations
 `series_observations` is compact bitemporal: PK `["series_id", "date", "realtime_start"]`, one
 row per value version. `vintage_date` and `realtime_end` are **not** stored — FRED clips
 `realtime_end` to each fetch window, so the faithful interval end is derived downstream as
-`LEAD(realtime_start) - 1 day`. This is a breaking change from any per-vintage materialization
-(incompatible columns + PK); migrating an existing deployment means dropping the old table and
-re-backfilling (runbook: `projects/financial-elt/sql/fred_compact_schema_migration.sql` in the
-financial-elt repo).
+`LEAD(realtime_start) - 1 day`. Fresh deploys create this schema on first load; only a prior
+per-vintage deployment *with data* needs a drop + re-backfill (incompatible columns + PK).

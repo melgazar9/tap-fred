@@ -189,11 +189,11 @@ class TestStreamRetriesOn403:
         return TapFRED(config=cfg, validate_config=False).streams["series_observations"]
 
     @staticmethod
-    def _resp(status, json_data=None):
+    def _resp(status, json_data=None, text=""):
         resp = mock.MagicMock()
         resp.status_code = status
         resp.reason = "Forbidden"
-        resp.text = ""
+        resp.text = text
         if status >= 400:
             resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
                 response=resp
@@ -240,3 +240,21 @@ class TestStreamRetriesOn403:
             with pytest.raises(requests.exceptions.HTTPError):
                 stream._make_request("https://api/x", {"api_key": "dummy"})
         assert get.call_count == 1  # a genuine 400 is fatal, no retry
+
+    def test_400_not_in_alfred_skipped_even_in_strict_mode(self):
+        """A 400 'does not exist in ALFRED' is an absence (FRED-only series with no vintage
+        history), not an error — skip it (return {}) even in strict_mode, so one non-ALFRED
+        series can't abort the whole stream."""
+        stream = self._stream()  # strict_mode=True
+        body = '{"error_code":400,"error_message":"Bad Request.  The series does not exist in ALFRED but may exist in FRED."}'
+        with (
+            mock.patch("time.sleep"),
+            mock.patch.object(
+                stream.requests_session,
+                "get",
+                side_effect=lambda *a, **k: self._resp(400, text=body),
+            ) as get,
+        ):
+            out = stream._make_request("https://api/x", {"api_key": "dummy"})
+        assert out == {}  # skipped as empty, not raised
+        assert get.call_count == 1  # not retried
