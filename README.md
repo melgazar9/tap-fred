@@ -71,9 +71,9 @@ meltano el --state-id my-job tap-fred target-jsonl --select series_observations
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `point_in_time_mode` | boolean | `false` | Create per-vintage-date partitions |
-| `point_in_time_start` | date | | Filter vintage dates from this date |
-| `point_in_time_end` | date | | Filter vintage dates up to this date |
+| `point_in_time_mode` | boolean | `false` | Emit compact bitemporal history per series (requires `strict_mode: true`) |
+| `point_in_time_start` | date | | Only fetch vintages on/after this date |
+| `point_in_time_end` | date | | Only fetch vintages on/before this date |
 
 ### Resource Selection
 
@@ -121,9 +121,24 @@ config:
   point_in_time_end: "2020-03-31"
   strict_mode: true
 ```
-Creates separate partitions for each vintage date within the range. Each partition captures the complete observation history as known on that specific vintage date.
+One partition per series (stable bookmark). For each series the tap pulls its full ALFRED
+revision history as **compact bitemporal rows** — one row per `(series_id, date, realtime_start)`
+value version — chunking the series' vintage dates into realtime-range requests of at most
+2000 vintages each (FRED's per-request cap). The full vintage "as of date V" is not
+materialized; it is a downstream read: `latest realtime_start <= V wins` (see
+`sql/fred_observations_asof.sql` in the financial-elt project). This stores ~1000x less than
+a per-vintage snapshot while reconstructing any vintage exactly.
 
-**Data leakage prevention**: If a series has no vintage dates in the requested range, it is skipped entirely — the tap will never fall back to current revised data in PIT mode. A runtime guard also verifies that every returned record's `realtime_start` matches the requested `vintage_date`.
+`point_in_time_mode` **requires** `strict_mode: true`: in permissive mode a swallowed
+mid-series error could let the SDK finalize the `realtime_start` bookmark past un-emitted
+vintages and silently drop point-in-time data, so the tap refuses to run PIT without it.
+
+**Leakage safety is intrinsic**: the as-of rule reads a value only once `realtime_start <= V`,
+so a value can never be seen before it was published. Two runtime guards back this — every
+emitted row's `realtime_start` must fall inside the requested realtime window (a row outside
+it means FRED returned a different vintage → `RuntimeError`), and each window pull is checked
+against FRED's reported `count` so a truncated (offset-capped) pull aborts rather than
+silently dropping rows.
 
 ## Available Streams
 
@@ -131,7 +146,7 @@ Creates separate partitions for each vintage date within the range. Each partiti
 
 | Stream | Endpoint | PK | Replication Key |
 |--------|----------|------|-----------------|
-| `series_observations` | `/fred/series/observations` | `series_id, date, realtime_start, realtime_end` | `realtime_start` |
+| `series_observations` | `/fred/series/observations` | `series_id, date, realtime_start` | `realtime_start` |
 | `series` | `/fred/series` | `id` | — |
 | `series_categories` | `/fred/series/categories` | `id` | — |
 | `series_release` | `/fred/series/release` | `id` | — |
@@ -200,9 +215,17 @@ Some streams require specific configuration to be registered:
 
 ## Migration Notes
 
-### PK Change for series_observations
+### Compact bitemporal series_observations
 
-`primary_keys` changed from `["series_id", "date"]` to `["series_id", "date", "realtime_start", "realtime_end"]`. This prevents vintage data from being overwritten during point-in-time backfills. Downstream targets doing upsert-by-PK will need to account for this wider key.
+`series_observations` is **compact bitemporal**: PK `["series_id", "date", "realtime_start"]`,
+one row per value version. `vintage_date` and `realtime_end` are **not** stored — FRED clips
+`realtime_end` to each fetch window, so a stored value would be wrong; the faithful interval
+end is derived downstream as `LEAD(realtime_start) - 1 day`.
+
+This is a **breaking change** from any prior per-vintage materialization: the old table is
+incompatible (different columns + PK, and the old per-vintage rows would corrupt the as-of
+read). Migrating an existing deployment requires dropping the old table and re-backfilling —
+see `projects/financial-elt/sql/fred_compact_schema_migration.sql` for the full runbook.
 
 ## Operations
 
