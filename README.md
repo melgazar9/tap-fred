@@ -238,11 +238,11 @@ RuntimeError (data leakage guards) always propagates regardless of strict_mode.
 
 ### Rate Limiting
 
-The tap uses a sliding window rate limiter shared across all streams. Default: 60 requests/minute with 1.0s minimum between requests. FRED allows up to 120/min but conservative defaults reduce 429 risk.
+The tap uses a sliding window rate limiter shared across all streams. Default: 60 requests/minute with 1.0s minimum between requests. FRED's ~120/min cap is **per-IP** (shared across API keys — rotating keys from one IP buys no extra throughput), so run a single worker and keep the per-IP budget under ~120/min; conservative defaults reduce throttle risk.
 
 ### Retry Logic
 
-Automatic retry on retriable errors. FRED throttles with both **403 and 429** over a rolling 60s window per key, so on either the tap waits the full 60s window before retrying (a short backoff just hits the same wall). Transient server errors (500, 502, 503, 504) use exponential backoff (5s–420s) with jitter.
+Automatic retry on retriable errors. FRED throttles with both **403 and 429** over a rolling 60s window per IP, so on either the tap waits the full 60s window before retrying (a short backoff just hits the same wall). Transient server errors (500, 502, 503, 504) use exponential backoff (5s–420s) with jitter.
 
 ### Chunked Backfills
 
@@ -252,13 +252,13 @@ For large wildcard backfills (`series_ids: ["*"]`), use narrow `point_in_time_st
 
 - State commits only after successful pipeline completion (Singer SDK guarantee).
 - If the process is killed mid-sync, the next run re-processes from the last committed bookmark — no data loss, but some records may be re-emitted.
-- Point-in-time partitions with existing bookmarks are skipped entirely (no API call), making re-runs efficient.
+- PIT mode keeps one partition per series and bookmarks on `realtime_start`; an incremental run fetches only vintages newer than the bookmark, so a series with no new vintages makes zero API calls.
 
 ### Post-Run Checks
 
 1. Check for skip summary warnings in logs (partitions that returned errors).
 2. Verify record counts against expectations for high-volume streams.
-3. For PIT mode: confirm `realtime_start` values in output match requested vintage dates.
+3. For PIT mode: confirm every output `realtime_start` falls within the requested vintage window (the integrity guard enforces this at runtime).
 
 ## Development
 

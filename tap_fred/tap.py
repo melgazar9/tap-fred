@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections import deque
+from collections import defaultdict, deque
 from threading import Lock
 
 from singer_sdk import Tap
@@ -195,7 +195,8 @@ class TapFRED(Tap):
             "point_in_time_mode",
             th.BooleanType,
             default=False,
-            description="Enable point-in-time vintage date partitioning for backtesting",
+            description="Emit compact bitemporal ALFRED history (one row per value version, "
+            "keyed by realtime_start); requires strict_mode. For leakage-free backtesting.",
         ),
         th.Property(
             "point_in_time_start",
@@ -242,6 +243,10 @@ class TapFRED(Tap):
     # Vintage dates caching
     _cached_vintage_dates: list[dict] | None = None
     _vintage_dates_lock = Lock()
+    # Per-resource grouping of the flat vintage cache, built once (the observations PIT
+    # path looks vintages up per series — a flat re-scan per series is O(series * cache)).
+    _vintage_dates_by_resource: dict[str, list[str]] | None = None
+    _vintage_dates_group_lock = Lock()
 
     def __init__(self, *args, **kwargs):
         # Shared rate limiter state must be initialized BEFORE super().__init__()
@@ -307,6 +312,22 @@ class TapFRED(Tap):
     def get_cached_vintage_dates(self):
         """Return cached vintage dates in consistent format [{'vintage_date': str}]."""
         return self._cache_resource_ids("vintage_date", SeriesVintageDatesStream(self))
+
+    def get_vintage_dates_by_resource(self) -> dict[str, list[str]]:
+        """Vintage dates grouped by resource_id, built once. Lets the observations PIT
+        path do a single dict lookup per series instead of re-scanning the flat cache.
+        """
+        if self._vintage_dates_by_resource is None:
+            # Resolve the flat cache before taking the group lock — get_cached_vintage_dates
+            # acquires _vintage_dates_lock, so locking here first would deadlock.
+            flat_cache = self.get_cached_vintage_dates()
+            with self._vintage_dates_group_lock:
+                if self._vintage_dates_by_resource is None:
+                    grouped: dict[str, list[str]] = defaultdict(list)
+                    for item in flat_cache:
+                        grouped[item["resource_id"]].append(item["vintage_date"])
+                    self._vintage_dates_by_resource = dict(grouped)
+        return self._vintage_dates_by_resource
 
     def _series_cache_path(self) -> str:
         """Resolve the on-disk discovery cache path.

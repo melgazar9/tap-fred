@@ -807,27 +807,19 @@ class PointInTimePartitionStream(FREDStream):
 
     def _get_vintage_dates_for_resource(self, resource_id: str) -> list[str]:
         """Sorted vintage dates for one resource, filtered to the configured PIT window."""
-        cached_vintage_dates = self._tap.get_cached_vintage_dates()
-        vintage_dates = [
-            item["vintage_date"]
-            for item in cached_vintage_dates
-            if item.get("resource_id") == resource_id
-        ]
+        vintage_dates = self._tap.get_vintage_dates_by_resource().get(resource_id, [])
 
         # Normalize the PIT bounds to date-only (YYYY-MM-DD). The settings are
         # date_iso8601, but a value carrying a time component ('2020-01-01T00:00:00')
         # would lexically compare GREATER than the matching 'YYYY-MM-DD' vintage and
         # silently drop the boundary vintage. Vintage dates are already date-only.
-        point_in_time_start = self.config.get("point_in_time_start")
-        point_in_time_end = self.config.get("point_in_time_end")
-        if point_in_time_start:
-            start = str(point_in_time_start)[:10]
-            vintage_dates = [d for d in vintage_dates if d[:10] >= start]
-        if point_in_time_end:
-            end = str(point_in_time_end)[:10]
-            vintage_dates = [d for d in vintage_dates if d[:10] <= end]
-
-        return sorted(vintage_dates)
+        start = str(self.config.get("point_in_time_start") or "")[:10]
+        end = str(self.config.get("point_in_time_end") or "")[:10]
+        return sorted(
+            d
+            for d in vintage_dates
+            if (not start or d >= start) and (not end or d <= end)
+        )
 
     def _chunk_realtime_windows(self, vintage_dates: list[str]):
         """Yield (realtime_start, realtime_end) windows spanning <= MAX_VINTAGES_PER_REQUEST
@@ -871,9 +863,10 @@ class PointInTimePartitionStream(FREDStream):
             if api_count is None:
                 api_count = response_data.get("count")
             records = response_data.get(records_key, [])
-            total += len(records)
+            n = len(records)
+            total += n
             yield from records
-            if len(records) < limit:
+            if n < limit:
                 break
             offset += limit
 

@@ -42,7 +42,7 @@ FREDStream (ABC, RESTStream)          # Core: rate limiting, retry, pagination, 
 ├── CategoryBasedFREDStream           # Partitioned by category_id
 ├── SourceBasedFREDStream             # Partitioned by source_id
 ├── TagBasedFREDStream                # Partitioned by tag_name
-└── PointInTimePartitionStream        # (resource_id, vintage_date) partitions for backtesting
+└── PointInTimePartitionStream        # per-series partitions; compact bitemporal ALFRED rows
 ```
 
 ### Key Files
@@ -56,7 +56,7 @@ FREDStream (ABC, RESTStream)          # Core: rate limiting, retry, pagination, 
 
 - **FRED** (default): Current revised data. `realtime_start`/`realtime_end` default to today.
 - **ALFRED**: Vintage historical data. Set `data_mode: ALFRED` with `realtime_start`/`realtime_end` to get data as-known-on a specific date.
-- **Point-in-Time**: Set `point_in_time_mode: true` to create separate partitions per vintage date for backtesting.
+- **Point-in-Time**: Set `point_in_time_mode: true` (requires `strict_mode: true`) to emit compact bitemporal ALFRED history — one partition per series, one row per `(series_id, date, realtime_start)` value version. Reconstruct any vintage downstream via "latest `realtime_start <= V` wins".
 
 ### Caching Pattern
 
@@ -106,5 +106,11 @@ Page-level errors mid-pagination (429, 500, offset cap 400) are handled:
 
 ## Migration Notes
 
-### PK Change for series_observations
-`primary_keys` changed from `["series_id", "date"]` to `["series_id", "date", "realtime_start", "realtime_end"]`. This prevents vintage data from being overwritten during point-in-time backfills. Downstream targets doing upsert-by-PK will need to account for this wider key. Per FRED docs, `realtime_start` and `realtime_end` together define the version identity of an observation.
+### Compact bitemporal series_observations
+`series_observations` is compact bitemporal: PK `["series_id", "date", "realtime_start"]`, one
+row per value version. `vintage_date` and `realtime_end` are **not** stored — FRED clips
+`realtime_end` to each fetch window, so the faithful interval end is derived downstream as
+`LEAD(realtime_start) - 1 day`. This is a breaking change from any per-vintage materialization
+(incompatible columns + PK); migrating an existing deployment means dropping the old table and
+re-backfilling (runbook: `projects/financial-elt/sql/fred_compact_schema_migration.sql` in the
+financial-elt repo).

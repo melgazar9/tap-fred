@@ -42,15 +42,19 @@ meltano el --state-id strict-pit-test tap-fred target-jsonl --select series_obse
 
 ### What to verify
 
-1. **GDP skipped**: Look for log line: `Skipping series_id='GDP' — no vintage dates in point-in-time range`
-   - GDP is quarterly — no vintage dates exist in a 10-day window (Jan 1-10)
-2. **DGS10 records**: Check output file, every record must have `realtime_start` == the partition's `vintage_date`
+1. **GDP makes no calls**: Look for log line: `series_id='GDP': no vintage dates to sync in PIT window`
+   - GDP is quarterly — no new vintage dates exist in a 10-day window (Jan 1-10), so it emits nothing
+2. **DGS10 records**: Compact rows — every record's `realtime_start` must fall WITHIN the requested
+   window `[point_in_time_start, point_in_time_end]`, and there must be no `vintage_date` field
+   (it is not stored). A `realtime_start` outside the window is leakage.
    ```bash
    cat output/series_observations.jsonl | python3 -c "
    import sys, json
+   LO, HI = '2025-01-01', '2025-01-10'
    for line in sys.stdin:
        r = json.loads(line)
-       assert r['realtime_start'] == r.get('vintage_date', r['realtime_start']), f'LEAKAGE: {r}'
+       assert 'vintage_date' not in r, f'STALE SCHEMA: {r}'
+       assert LO <= r['realtime_start'][:10] <= HI, f'LEAKAGE: {r}'
    print('All records pass leakage check')
    "
    ```
@@ -80,7 +84,7 @@ cat output/replay_run2_count.txt
 
 ### What to verify
 
-- **PIT mode**: Run 2 should emit 0 records (all vintage partitions already bookmarked)
+- **PIT mode**: Run 2 should emit 0 records (every series bookmarked at its latest `realtime_start`; no vintages newer than the bookmark)
 - **Standard mode**: Run 2 should emit 0 or very few records (only truly new data since Run 1)
 - Check log for `Skipping partition` or `bookmark` messages confirming skip behavior
 
@@ -142,9 +146,9 @@ After running the above, fill in:
 | Gate | Status | Evidence |
 |------|--------|----------|
 | README matches runtime behavior | | |
-| 75/75 unit/integration tests green | | `uv run pytest tests/test_integration.py tests/test_comprehensive.py` |
-| GDP skipped in strict PIT (no fallback) | | `strict_pit_run.log` |
-| DGS10 realtime_start == vintage_date | | output file check |
+| All unit/integration tests green | | `uv run pytest tests/test_integration.py tests/test_comprehensive.py` |
+| GDP makes no calls in strict PIT (no fallback) | | `strict_pit_run.log` |
+| DGS10 realtime_start within PIT window; no vintage_date field | | output file check |
 | Zero unexplained skipped partitions | | log inspection |
 | Run 2 emits 0 records (idempotent) | | `replay_run2_count.txt` |
 | Reconciliation counts match API | | comparison output |
